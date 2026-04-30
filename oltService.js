@@ -59,47 +59,49 @@ function parseShowTemperature(output) {
   return temps;
 }
 
-function parseShowOnu(output) {
+function parseShowOnu(output, targetSlot) {
   const onus = [];
   const lines = output.split('\n');
   
+  // Format ZTE C300 "show gpon onu state":
+  // OnuIndex          Admin State  OMCC State   Phase State  Channel
+  // -----------------------------------------------------------------------
+  // gpon-onu_1/1/3:1  enable       enable       working      gei_1/1/3:1
+  
   for (const line of lines) {
     const raw = line.trim();
-    if (!raw || 
-        raw.toLowerCase().includes('onu') || 
-        raw.toLowerCase().includes('show') ||
-        raw.toLowerCase().includes('index') ||
-        raw.toLowerCase().includes('total') ||
-        raw.startsWith('---') || 
-        raw.startsWith('#')) continue;
+    if (!raw || raw.startsWith('---') || raw.startsWith('OnuIndex')) continue;
 
     const cols = raw.split(/\s+/);
-    if (cols.length < 3) continue;
+    if (cols.length < 4) continue;
 
-    // Bersihkan ONU ID (biasanya angka di kolom pertama)
-    const onuIdRaw = cols[0];
-    const onuMatch = onuIdRaw.match(/\d+$/);
-    if (!onuMatch) continue;
-    const onuId = onuMatch[0];
+    const fullId = cols[0]; // Contoh: gpon-onu_1/1/3:1 atau 1/1/3:1
+    
+    // Cek apakah ONU ini berada di slot yang kita inginkan
+    // Format pencocokan: Rack/Shelf/Slot
+    const match = fullId.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
+    if (match) {
+      const rack = match[1];
+      const shelf = match[2];
+      const slot = match[3];
+      const onuIdx = match[4];
 
-    // Status biasanya ada di kolom "Phase State" atau "State"
-    // Untuk "show gpon onu state", status ada di kolom ke-4 atau ke-5
-    let status = 'offline';
-    for (const col of cols) {
-      const c = col.toLowerCase();
-      if (c === 'working' || c === 'online' || c === 'up' || c === 'los') {
-        status = (c === 'los') ? 'offline' : 'online';
-        break;
+      if (parseInt(slot) === parseInt(targetSlot)) {
+        let status = 'offline';
+        const stateStr = raw.toLowerCase();
+        if (stateStr.includes('working') || stateStr.includes('online')) {
+          status = 'online';
+        }
+
+        onus.push({ 
+          onuId: onuIdx, 
+          status: status, 
+          name: `ONU ${onuIdx}`,
+          interface: `${rack}/${shelf}/${slot}:${onuIdx}`,
+          rxPower: 'N/A'
+        });
       }
     }
-
-    onus.push({ 
-      onuId: onuId, 
-      status: status, 
-      name: `ONU ${onuId}`,
-      interface: `PON 1/1/${onuId}`,
-      rxPower: 'N/A'
-    });
   }
   return onus;
 }
@@ -245,30 +247,18 @@ class OltService {
   }
 
   async getOnuList(slot) {
-    console.log(`[OLT] Fetching ONU list for slot ${slot}...`);
+    console.log(`[OLT] Fetching global ONU list and filtering for slot ${slot}...`);
     let output = '';
     try {
-      // Coba variasi Rack 1 (Default umum)
-      const res1 = await this._telnetExec([`show gpon onu state gpon-olt_1/1/${slot}`]);
-      output = res1[0].output;
-      
-      // Jika kosong atau error, coba variasi Rack 0
-      if (!output || output.includes('Error') || output.includes('Invalid')) {
-        const res0 = await this._telnetExec([`show gpon onu state gpon-olt_0/1/${slot}`]);
-        output = res0[0].output;
-      }
-
-      // Jika masih kosong, coba perintah alternatif
-      if (!output || output.includes('Error')) {
-        const resAlt = await this._telnetExec([`show onu authentication gpon-onu_1/1/${slot}`]);
-        output = resAlt[0].output;
-      }
+      // Perintah global ini biasanya ada di semua versi ZTE C300
+      const res = await this._telnetExec(['show gpon onu state']);
+      output = res[0].output;
     } catch (e) {
-      console.error(`[OLT] Failed to exec ONU list command:`, e.message);
+      console.error(`[OLT] Failed to exec global ONU list command:`, e.message);
     }
 
-    const list = parseShowOnu(output);
-    console.log(`[OLT_DEBUG] Raw Output for Slot ${slot}:\n${output}`);
+    const list = parseShowOnu(output, slot);
+    console.log(`[OLT_DEBUG] Raw Output length: ${output.length} bytes`);
     console.log(`[OLT] Found ${list.length} ONUs in slot ${slot}`);
     return list;
   }
