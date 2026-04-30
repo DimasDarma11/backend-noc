@@ -268,6 +268,7 @@ class OltService {
     }
 
     const list = parseShowOnu(output);
+    console.log(`[OLT_DEBUG] Raw Output for Slot ${slot}:\n${output}`);
     console.log(`[OLT] Found ${list.length} ONUs in slot ${slot}`);
     return list;
   }
