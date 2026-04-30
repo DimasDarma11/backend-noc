@@ -63,44 +63,42 @@ function parseShowOnu(output) {
   const onus = [];
   const lines = output.split('\n');
   
-  // ZTE C300 "show onu authentication" typical output format:
-  // OnuIndex  OnuName  SN/Password  Status  ...
-  // -------------------------------------------
-  // 1         ONU1     ZTEGC...     working
-  
   for (const line of lines) {
     const raw = line.trim();
-    // Abaikan baris kosong, header, garis pemisah, dan echo perintah
     if (!raw || 
         raw.toLowerCase().includes('onu') || 
         raw.toLowerCase().includes('show') ||
         raw.toLowerCase().includes('index') ||
+        raw.toLowerCase().includes('total') ||
         raw.startsWith('---') || 
-        raw.startsWith('#') ||
-        raw.includes('Error')) continue;
+        raw.startsWith('#')) continue;
 
     const cols = raw.split(/\s+/);
     if (cols.length < 3) continue;
 
-    // Bersihkan data dari karakter non-printable atau prompt
-    const onuId = cols[0].replace(/[^\d]/g, '');
-    if (!onuId) continue;
+    // Bersihkan ONU ID (biasanya angka di kolom pertama)
+    const onuIdRaw = cols[0];
+    const onuMatch = onuIdRaw.match(/\d+$/);
+    if (!onuMatch) continue;
+    const onuId = onuMatch[0];
 
-    // Status biasanya di kolom ke-4 (index 3) atau terakhir
-    let status = (cols[3] || cols[cols.length - 1]).toLowerCase();
-    
-    // Normalisasi status untuk UI
-    if (status.includes('work') || status.includes('up') || status.includes('online')) {
-      status = 'online';
-    } else {
-      status = 'offline';
+    // Status biasanya ada di kolom "Phase State" atau "State"
+    // Untuk "show gpon onu state", status ada di kolom ke-4 atau ke-5
+    let status = 'offline';
+    for (const col of cols) {
+      const c = col.toLowerCase();
+      if (c === 'working' || c === 'online' || c === 'up' || c === 'los') {
+        status = (c === 'los') ? 'offline' : 'online';
+        break;
+      }
     }
 
     onus.push({ 
       onuId: onuId, 
       status: status, 
       name: `ONU ${onuId}`,
-      interface: `PON 1/1/${onuId}` 
+      interface: `PON 1/1/${onuId}`,
+      rxPower: 'N/A'
     });
   }
   return onus;
@@ -239,8 +237,8 @@ class OltService {
   }
 
   async getOnuList(slot) {
-    // Priority Telnet for detailed list
-    const results = await this._telnetExec([`show onu authentication gpon-onu_1/1/${slot}`]);
+    // Perintah yang lebih akurat untuk status ONU di ZTE C300
+    const results = await this._telnetExec([`show gpon onu state gpon-olt_1/1/${slot}`]);
     return parseShowOnu(results[0].output);
   }
 
