@@ -63,22 +63,17 @@ function parseShowOnu(output, targetSlot) {
   const onus = [];
   const lines = output.split('\n');
   
-  // Format ZTE C300 "show gpon onu state":
-  // OnuIndex          Admin State  OMCC State   Phase State  Channel
-  // -----------------------------------------------------------------------
-  // gpon-onu_1/1/3:1  enable       enable       working      gei_1/1/3:1
-  
   for (const line of lines) {
     const raw = line.trim();
-    if (!raw || raw.startsWith('---') || raw.startsWith('OnuIndex')) continue;
+    if (!raw || raw.startsWith('---') || raw.toLowerCase().includes('onuindex')) continue;
 
     const cols = raw.split(/\s+/);
     if (cols.length < 4) continue;
 
-    const fullId = cols[0]; // Contoh: gpon-onu_1/1/3:1 atau 1/1/3:1
+    const fullId = cols[0]; 
     
-    // Cek apakah ONU ini berada di slot yang kita inginkan
-    // Format pencocokan: Rack/Shelf/Slot
+    // Pattern ZTE: gpon-onu_Rack/Shelf/Slot:OnuIndex
+    // Contoh: gpon-onu_1/3/3:1
     const match = fullId.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
     if (match) {
       const rack = match[1];
@@ -86,10 +81,12 @@ function parseShowOnu(output, targetSlot) {
       const slot = match[3];
       const onuIdx = match[4];
 
+      // Saring hanya untuk slot yang dipilih
       if (parseInt(slot) === parseInt(targetSlot)) {
         let status = 'offline';
-        const stateStr = raw.toLowerCase();
-        if (stateStr.includes('working') || stateStr.includes('online')) {
+        // Cari status di seluruh kolom (biasanya "working" atau "online")
+        const rowText = raw.toLowerCase();
+        if (rowText.includes('working') || rowText.includes('online')) {
           status = 'online';
         }
 
@@ -98,12 +95,26 @@ function parseShowOnu(output, targetSlot) {
           status: status, 
           name: `ONU ${onuIdx}`,
           interface: `${rack}/${shelf}/${slot}:${onuIdx}`,
-          rxPower: 'N/A'
+          rxPower: 'Loading...' 
         });
       }
     }
   }
   return onus;
+}
+
+function parseOpticalPower(output) {
+  const powers = {};
+  const lines = output.split('\n');
+  for (const line of lines) {
+    const raw = line.trim();
+    const match = raw.match(/(\d+)\/(\d+)\/(\d+):(\d+)\s+([-.\d]+)/);
+    if (match) {
+      const key = `${match[1]}/${match[2]}/${match[3]}:${match[4]}`;
+      powers[key] = match[5] + ' dBm';
+    }
+  }
+  return powers;
 }
 
 class OltService {
@@ -247,18 +258,39 @@ class OltService {
   }
 
   async getOnuList(slot) {
-    console.log(`[OLT] Fetching global ONU list and filtering for slot ${slot}...`);
-    let output = '';
+    console.log(`[OLT] Fetching ONU list & Optical Power for slot ${slot}...`);
+    let stateOutput = '';
+    let powerOutput = '';
+    
     try {
-      // Perintah global ini biasanya ada di semua versi ZTE C300
-      const res = await this._telnetExec(['show gpon onu state']);
-      output = res[0].output;
+      // 1. Ambil status ONU secara massal
+      const resState = await this._telnetExec(['show gpon onu state']);
+      stateOutput = resState[0].output;
+
+      // 2. Ambil redaman (power) secara massal untuk slot tersebut
+      // Kita coba variasi Rack/Shelf yang paling umum
+      const resPower = await this._telnetExec([
+        `show pon power gpon-olt_1/1/${slot}`,
+        `show pon power gpon-olt_0/1/${slot}`,
+        `show pon power gpon-olt_1/3/${slot}`
+      ]);
+      powerOutput = resPower.map(r => r.output).join('\n');
     } catch (e) {
-      console.error(`[OLT] Failed to exec global ONU list command:`, e.message);
+      console.error(`[OLT] Failed to fetch ONU data:`, e.message);
     }
 
-    const list = parseShowOnu(output, slot);
-    console.log(`[OLT_DEBUG] Raw Output length: ${output.length} bytes`);
+    const list = parseShowOnu(stateOutput, slot);
+    const powers = parseOpticalPower(powerOutput);
+
+    // Gabungkan data status dengan data sinyal
+    for (const onu of list) {
+      if (powers[onu.interface]) {
+        onu.rxPower = powers[onu.interface];
+      } else {
+        onu.rxPower = 'N/A';
+      }
+    }
+
     console.log(`[OLT] Found ${list.length} ONUs in slot ${slot}`);
     return list;
   }
