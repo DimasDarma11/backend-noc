@@ -175,13 +175,21 @@ class OltService {
         execTimeout: 30000,
         sendTimeout: 15000,
       });
+      
+      // Masuk ke mode enable jika prompt masih >
+      await client.exec('enable').catch(() => {});
+      await client.exec(this.telnetPass).catch(() => {}); // Biasanya password enable sama dengan telnet
       await client.exec('terminal length 0').catch(() => {});
+
       for (const cmd of commands) {
+        console.log(`[OLT_EXEC] Sending: ${cmd}`);
         const out = await client.exec(cmd);
+        console.log(`[OLT_EXEC] Received ${out.length} bytes for ${cmd}`);
         results.push({ cmd, output: out });
       }
       await client.end();
     } catch (err) {
+      console.error(`[OLT_TELNET_ERROR] ${err.message}`);
       await client.end().catch(() => {});
       throw err;
     }
