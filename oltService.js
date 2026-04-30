@@ -237,14 +237,47 @@ class OltService {
   }
 
   async getOnuList(slot) {
-    // Perintah yang lebih akurat untuk status ONU di ZTE C300
-    const results = await this._telnetExec([`show gpon onu state gpon-olt_1/1/${slot}`]);
-    return parseShowOnu(results[0].output);
+    console.log(`[OLT] Fetching ONU list for slot ${slot}...`);
+    let output = '';
+    try {
+      // Coba variasi Rack 1 (Default umum)
+      const res1 = await this._telnetExec([`show gpon onu state gpon-olt_1/1/${slot}`]);
+      output = res1[0].output;
+      
+      // Jika kosong atau error, coba variasi Rack 0
+      if (!output || output.includes('Error') || output.includes('Invalid')) {
+        const res0 = await this._telnetExec([`show gpon onu state gpon-olt_0/1/${slot}`]);
+        output = res0[0].output;
+      }
+
+      // Jika masih kosong, coba perintah alternatif
+      if (!output || output.includes('Error')) {
+        const resAlt = await this._telnetExec([`show onu authentication gpon-onu_1/1/${slot}`]);
+        output = resAlt[0].output;
+      }
+    } catch (e) {
+      console.error(`[OLT] Failed to exec ONU list command:`, e.message);
+    }
+
+    const list = parseShowOnu(output);
+    console.log(`[OLT] Found ${list.length} ONUs in slot ${slot}`);
+    return list;
   }
 
   async getOnuDetail(slot, onuId) {
-    const results = await this._telnetExec([`show onu running-config gpon-onu_1/1/${slot}:${onuId}`]);
-    return { output: results[0].output };
+    const commands = [
+      `show onu running-config gpon-onu_1/1/${slot}:${onuId}`,
+      `show onu running-config gpon-onu_0/1/${slot}:${onuId}`
+    ];
+    for (const cmd of commands) {
+      try {
+        const res = await this._telnetExec([cmd]);
+        if (res[0].output && !res[0].output.includes('Error')) {
+          return { output: res[0].output };
+        }
+      } catch (e) {}
+    }
+    return { output: 'Data detail tidak ditemukan.' };
   }
 }
 
