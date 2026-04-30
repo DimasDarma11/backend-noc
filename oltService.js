@@ -62,12 +62,46 @@ function parseShowTemperature(output) {
 function parseShowOnu(output) {
   const onus = [];
   const lines = output.split('\n');
+  
+  // ZTE C300 "show onu authentication" typical output format:
+  // OnuIndex  OnuName  SN/Password  Status  ...
+  // -------------------------------------------
+  // 1         ONU1     ZTEGC...     working
+  
   for (const line of lines) {
     const raw = line.trim();
-    if (!raw || raw.includes('ONU') || raw.startsWith('---')) continue;
+    // Abaikan baris kosong, header, garis pemisah, dan echo perintah
+    if (!raw || 
+        raw.toLowerCase().includes('onu') || 
+        raw.toLowerCase().includes('show') ||
+        raw.toLowerCase().includes('index') ||
+        raw.startsWith('---') || 
+        raw.startsWith('#') ||
+        raw.includes('Error')) continue;
+
     const cols = raw.split(/\s+/);
-    if (cols.length < 4) continue;
-    onus.push({ onuId: cols[0], status: cols[3], name: cols[0] });
+    if (cols.length < 3) continue;
+
+    // Bersihkan data dari karakter non-printable atau prompt
+    const onuId = cols[0].replace(/[^\d]/g, '');
+    if (!onuId) continue;
+
+    // Status biasanya di kolom ke-4 (index 3) atau terakhir
+    let status = (cols[3] || cols[cols.length - 1]).toLowerCase();
+    
+    // Normalisasi status untuk UI
+    if (status.includes('work') || status.includes('up') || status.includes('online')) {
+      status = 'online';
+    } else {
+      status = 'offline';
+    }
+
+    onus.push({ 
+      onuId: onuId, 
+      status: status, 
+      name: `ONU ${onuId}`,
+      interface: `PON 1/1/${onuId}` 
+    });
   }
   return onus;
 }
