@@ -646,11 +646,17 @@ function mapDevice(device, isRebooting = false) {
   // PPPoE
   const pppoeUser = getParam(device,
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username',
-    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Username'
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.2.Username',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Username',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.1.Username',
+    'Device.PPP.Interface.1.Username'
   );
   const pppoePass = getParam(device,
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password',
-    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Password'
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.2.Password',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Password',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.1.Password',
+    'Device.PPP.Interface.1.Password'
   );
 
   // VLAN
@@ -694,6 +700,8 @@ function mapDevice(device, isRebooting = false) {
     'InternetGatewayDevice.WANDevice.1.X_ZTE_GponInterafceConfig.RXPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_GponInterfaceConfig.RXPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.RXPower',
+    'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_OpticalStatus.RxPower',
+    'InternetGatewayDevice.WANDevice.1.PhyInterface.1.RxPower',
     'Device.Optical.Interface.1.OpticalSignalLevel'
   );
   const txPower = getParam(device,
@@ -788,7 +796,7 @@ function mapDevice(device, isRebooting = false) {
 app.get('/api/devices', requireAuth, async (req, res) => {
   try {
     const client = getAcsClient();
-    const response = await client.get('/devices?projection=_id,_lastInform,_tags,InternetGatewayDevice.DeviceInfo,InternetGatewayDevice.WANDevice,InternetGatewayDevice.LANDevice.1.WLANConfiguration,InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Stats');
+    const response = await client.get('/devices?projection=_id,_lastInform,_tags,InternetGatewayDevice.DeviceInfo,InternetGatewayDevice.WANDevice,InternetGatewayDevice.LANDevice.1.WLANConfiguration,InternetGatewayDevice.WANDevice.1.WANConnectionDevice,Device.DeviceInfo,Device.WANDevice,Device.IP.Interface,Device.PPP.Interface,Device.Optical.Interface');
     const devices = response.data.map(d => mapDevice(d));
     res.json(devices);
   } catch (error) {
