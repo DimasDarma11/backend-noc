@@ -996,37 +996,24 @@ app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (
       else if (folder.includes('olt') || nameLower.startsWith('olt')) type = 'OLT';
       else if (folder.includes('ont') || folder.includes('onu') || folder.includes('pelanggan')) type = 'ONT';
 
-      // 5. Simpan sesuai tipe
-      if (type === 'ODP' || type === 'ODC') {
-        const existing = infraData.find(i => i.name === name);
-        if (!existing) {
-          const newOdp = {
-            id: 'odp_' + Math.random().toString(36).substr(2, 9),
-            name,
-            coordinates: [lat, lng],
-            maxPorts: type === 'ODC' ? 8 : 8,
-            type
-          };
-          infraData.push(newOdp);
-          imported++;
-          items.push({ name, type, lat, lng });
-        } else {
-          existing.coordinates = [lat, lng];
-          imported++;
-          items.push({ name, type, lat, lng, updated: true });
-        }
+      // 5. Simpan sesuai tipe (Sekarang semua masuk ke infraData supaya muncul di peta)
+      const existing = infraData.find(i => i.name === name);
+      if (!existing) {
+        const newItem = {
+          id: (type === 'ODP' ? 'odp_' : 'pt_') + Math.random().toString(36).substr(2, 9),
+          name,
+          coordinates: [lat, lng],
+          maxPorts: (type === 'ODC' || type === 'ODP') ? 8 : 0,
+          type: type // ODP, ODC, ONT, or POINT
+        };
+        infraData.push(newItem);
+        imported++;
+        items.push({ name, type, lat, lng });
       } else {
-        // Simpan sebagai koordinat custom (titik jalan, ONT tanpa SN, dll)
-        const pointId = 'kml_' + name.replace(/\s+/g, '_').toLowerCase().substr(0, 30);
-        if (!coordsStore[pointId]) {
-          coordsStore[pointId] = { coords: [lat, lng], name, type };
-          imported++;
-          items.push({ name, type, lat, lng });
-        } else {
-          coordsStore[pointId].coords = [lat, lng];
-          imported++;
-          items.push({ name, type, lat, lng, updated: true });
-        }
+        existing.coordinates = [lat, lng];
+        existing.type = type;
+        imported++;
+        items.push({ name, type, lat, lng, updated: true });
       }
     });
 
