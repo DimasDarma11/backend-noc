@@ -79,28 +79,63 @@ app.get('/api/system/status', async (req, res) => {
   let config = { vpn: {}, mikrotiks: [] };
   try { config = loadConfig(); } catch (e) {}
   
-  // 1. ACS Check
+  const isWin = process.platform === 'win32';
+  const { execSync } = require('child_process');
+
+  // 1. ACS Check (Real Reachability)
   let acsStatus = 'offline';
   if (config.url) {
     try {
       const testUrl = config.url.endsWith('/') ? config.url : `${config.url}/`;
-      const acsRes = await axios.get(testUrl, { timeout: 3000 }).catch(() => null);
-      if (acsRes && (acsRes.status === 200 || acsRes.status === 401)) acsStatus = 'online';
+      const acsRes = await axios.get(testUrl, { timeout: 2000 }).catch(() => null);
+      if (acsRes && (acsRes.status === 200 || acsRes.status === 401)) {
+        acsStatus = 'online';
+      } else {
+        const ip = config.url.replace('http://', '').replace('https://', '').split(':')[0].split('/')[0];
+        const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
+        try {
+          execSync(pingCmd, { stdio: 'ignore' });
+          acsStatus = 'online';
+        } catch(e) {}
+      }
     } catch (e) {}
   }
 
-  // 2. OLT Status
+  // 2. OLT Status (Real-time memory check)
   let oltStatus = 'offline';
   const oltKeys = Object.keys(oltPushStatus);
   if (oltKeys.length > 0) {
     oltStatus = oltKeys.some(ip => oltPushStatus[ip].status === 'online') ? 'online' : 'offline';
   }
 
-  // 3. Mikrotik Status
-  const mikrotikStatus = config.mikrotiks?.length > 0 ? 'online' : 'offline';
+  // 3. VPN Status (Real Interface Check)
+  let vpnStatus = 'offline';
+  try {
+    const ifaceCmd = isWin ? 'ipconfig' : 'ip addr show';
+    const interfaces = execSync(ifaceCmd).toString().toLowerCase();
+    // Cek keberadaan keyword tunnel/ppp/wireguard
+    if (interfaces.includes('ppp') || interfaces.includes('wg') || interfaces.includes('tun') || interfaces.includes('wireguard') || interfaces.includes('tap')) {
+      vpnStatus = 'online';
+    } else if (config.vpn?.enabled) {
+      vpnStatus = 'dialing';
+    }
+  } catch (e) {
+    vpnStatus = config.vpn?.status || 'offline';
+  }
 
-  // 4. VPN Status
-  const vpnStatus = config.vpn?.status || (config.vpn?.enabled ? 'dialing' : 'offline');
+  // 4. Mikrotik Status (Reachability Check)
+  let mikrotikStatus = 'offline';
+  if (config.mikrotiks?.length > 0) {
+    const firstMk = config.mikrotiks[0];
+    const ip = firstMk.mkIp.split(':')[0];
+    const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
+    try {
+      execSync(pingCmd, { stdio: 'ignore' });
+      mikrotikStatus = 'online';
+    } catch (e) {
+      mikrotikStatus = 'offline';
+    }
+  }
 
   res.json({
     acsStatus,
