@@ -11,7 +11,13 @@ const FileStore = require('session-file-store')(session);
 const { exec } = require('child_process');
 const oltService = require('./oltService');
 const mikrotikService = require('./mikrotikService');
+const multer = require('multer');
+const { XMLParser } = require('fast-xml-parser');
+const AdmZip = require('adm-zip');
 require('dotenv').config();
+
+// Multer: simpan file upload di memory (tidak perlu ke disk)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -630,25 +636,33 @@ function mapDevice(device, isRebooting = false) {
     'InternetGatewayDevice.DeviceInfo.HardwareVersion'
   );
 
-  // IP
+  // IP — F609/Huawei often uses WANConnectionDevice index 4 or 5 for PPPoE/INTERNET service
   const ip = getParam(device,
-    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ExternalIPAddress',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.ExternalIPAddress',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.1.ExternalIPAddress',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.5.WANPPPConnection.1.ExternalIPAddress',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.6.WANPPPConnection.1.ExternalIPAddress',
     'Device.IP.Interface.1.IPv4Address.1.IPAddress'
   );
 
   // MAC
   const mac = getParam(device,
     'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.1.MACAddress',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.MACAddress',
     'Device.Ethernet.Interface.1.MACAddress'
   );
 
-  // PPPoE
+  // PPPoE — F609 Huawei biasanya di index WANConnectionDevice 4 atau 5
   const pppoeUser = getParam(device,
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.2.Username',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Username',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.1.Username',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.1.Username',  // F609
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.5.WANPPPConnection.1.Username',  // F609
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.6.WANPPPConnection.1.Username',  // F609
     'Device.PPP.Interface.1.Username'
   );
   const pppoePass = getParam(device,
@@ -656,12 +670,17 @@ function mapDevice(device, isRebooting = false) {
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.2.Password',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANPPPConnection.1.Password',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.3.WANPPPConnection.1.Password',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.1.Password',  // F609
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.5.WANPPPConnection.1.Password',  // F609
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.6.WANPPPConnection.1.Password',  // F609
     'Device.PPP.Interface.1.Password'
   );
 
-  // VLAN
+  // VLAN — F609 uses X_HW_VlanID
   const vlan = getParam(device,
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.X_HW_VlanID',
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.4.WANPPPConnection.1.X_HW_VlanID',  // F609
+    'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.5.WANPPPConnection.1.X_HW_VlanID',  // F609
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.X_CMCC_VLanID',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.VLANID',
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.X_ZTE-COM_VLANID',
@@ -669,33 +688,36 @@ function mapDevice(device, isRebooting = false) {
     'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.X_ZTE-COM_VLANID'
   ) || '—';
 
-  // WiFi 2.4G
+  // WiFi 2.4G — F609 uses KeyPassphrase (not PreSharedKey)
   const ssid = getParam(device,
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID',
     'Device.WiFi.SSID.1.SSID'
   );
   const wifiPass = getParam(device,
+    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase',         // F609/Huawei
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey',
     'Device.WiFi.AccessPoint.1.Security.KeyPassphrase'
   );
 
-  // WiFi 5G
+  // WiFi 5G — F609 uses index 5 for 5GHz radio
   const ssid5G = getParam(device,
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.SSID',
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.2.SSID',
     'Device.WiFi.SSID.2.SSID'
   );
   const wifiPass5G = getParam(device,
+    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.KeyPassphrase',         // F609/Huawei
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey',
+    'InternetGatewayDevice.LANDevice.1.WLANConfiguration.2.KeyPassphrase',         // F609/Huawei alt
     'InternetGatewayDevice.LANDevice.1.WLANConfiguration.2.PreSharedKey.1.PreSharedKey',
     'Device.WiFi.AccessPoint.2.Security.KeyPassphrase'
   );
 
-  // Optical Power
+  // Optical Power — Huawei F609 specific path
   const rxPower = getParam(device,
     'VirtualParameters.RXPower',
+    'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig.RxPower',      // F609 Huawei
     'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.RXPower',
-    'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig.RxPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_GPON.RxOpticalPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE_GponInterafceConfig.RXPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_GponInterfaceConfig.RXPower',
@@ -706,8 +728,8 @@ function mapDevice(device, isRebooting = false) {
   );
   const txPower = getParam(device,
     'VirtualParameters.TXPower',
+    'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig.TxPower',      // F609 Huawei
     'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.TXPower',
-    'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig.TxPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_GPON.TxOpticalPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_GponInterfaceConfig.TXPower',
     'InternetGatewayDevice.WANDevice.1.X_ZTE-COM_WANPONInterfaceConfig.TXPower',
@@ -796,7 +818,23 @@ function mapDevice(device, isRebooting = false) {
 app.get('/api/devices', requireAuth, async (req, res) => {
   try {
     const client = getAcsClient();
-    const response = await client.get('/devices?projection=_id,_lastInform,_tags,InternetGatewayDevice.DeviceInfo,InternetGatewayDevice.WANDevice,InternetGatewayDevice.LANDevice.1.WLANConfiguration,InternetGatewayDevice.WANDevice.1.WANConnectionDevice,Device.DeviceInfo,Device.WANDevice,Device.IP.Interface,Device.PPP.Interface,Device.Optical.Interface');
+    // Projection includes VirtualParameters (RXPower/TXPower) and Huawei-specific X_HUAWEI_GponInterfaceConfig
+    const projection = [
+      '_id', '_lastInform', '_tags',
+      'VirtualParameters',                                              // RXPower/TXPower virtual params
+      'InternetGatewayDevice.DeviceInfo',
+      'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig', // F609 optical power
+      'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig',        // Generic GPON
+      'InternetGatewayDevice.WANDevice.1.WANConnectionDevice',           // PPPoE / IP (all indices)
+      'InternetGatewayDevice.LANDevice.1.WLANConfiguration',            // WiFi
+      'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig',   // MAC
+      'Device.DeviceInfo',
+      'Device.IP.Interface',
+      'Device.PPP.Interface',
+      'Device.Optical.Interface',
+      'Device.WiFi'
+    ].join(',');
+    const response = await client.get(`/devices?projection=${projection}`);
     const devices = response.data.map(d => mapDevice(d));
     res.json(devices);
   } catch (error) {
@@ -891,6 +929,121 @@ app.delete('/api/infrastructure/:id', requireAuth, (req, res) => {
   addAuditLog('Infrastructure', 'warning', `Deleted ODP: ${odp?.name || id}`, req.session.user);
   io.emit('infraUpdated');
   res.json({ success: true });
+});
+
+// ─── POST /api/infrastructure/import-kml ─────────────────────────────────────
+app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diupload.' });
+
+    let kmlBuffer = req.file.buffer;
+    const originalName = req.file.originalname.toLowerCase();
+
+    // 1. Jika KMZ (ZIP) → ekstrak file .kml di dalamnya
+    if (originalName.endsWith('.kmz')) {
+      const zip = new AdmZip(kmlBuffer);
+      const kmlEntry = zip.getEntries().find(e => e.entryName.endsWith('.kml'));
+      if (!kmlEntry) return res.status(400).json({ error: 'KMZ tidak berisi file .kml.' });
+      kmlBuffer = kmlEntry.getData();
+    }
+
+    // 2. Parse KML XML
+    const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '_', isArray: (name) => ['Placemark', 'Folder'].includes(name) });
+    const kmlObj = parser.parse(kmlBuffer.toString('utf8'));
+    const doc = kmlObj?.kml?.Document || kmlObj?.kml;
+
+    // 3. Flatten semua Placemark dengan info folder parentnya
+    function extractPlacemarks(node, parentFolder = '') {
+      const results = [];
+      const folders = Array.isArray(node?.Folder) ? node.Folder : (node?.Folder ? [node.Folder] : []);
+      const placemarks = Array.isArray(node?.Placemark) ? node.Placemark : (node?.Placemark ? [node.Placemark] : []);
+
+      placemarks.forEach(pm => results.push({ ...pm, _parentFolder: parentFolder }));
+      folders.forEach(f => {
+        const fname = f?.name || '';
+        results.push(...extractPlacemarks(f, fname));
+      });
+      return results;
+    }
+
+    const allPlacemarks = extractPlacemarks(doc);
+    console.log(`[KML Import] Total placemarks ditemukan: ${allPlacemarks.length}`);
+
+    let imported = 0;
+    let skipped = 0;
+    const items = [];
+
+    allPlacemarks.forEach(pm => {
+      const name = String(pm?.name || '').trim();
+      const folder = String(pm?._parentFolder || '').trim().toLowerCase();
+      const coordStr = pm?.Point?.coordinates || pm?.coordinates;
+
+      if (!coordStr || !name) { skipped++; return; }
+
+      // KML koordinat: lng,lat,alt → kita butuh [lat, lng]
+      const parts = String(coordStr).trim().split(',');
+      const lng = parseFloat(parts[0]);
+      const lat = parseFloat(parts[1]);
+
+      if (isNaN(lat) || isNaN(lng)) { skipped++; return; }
+      if (Math.abs(lat) > 90 || Math.abs(lng) > 180) { skipped++; return; }
+
+      // 4. Deteksi tipe berdasarkan folder atau nama
+      const nameLower = name.toLowerCase();
+      let type = 'POINT';
+      if (folder.includes('odp') || nameLower.startsWith('odp') || nameLower.includes('-odp')) type = 'ODP';
+      else if (folder.includes('odc') || nameLower.startsWith('odc')) type = 'ODC';
+      else if (folder.includes('olt') || nameLower.startsWith('olt')) type = 'OLT';
+      else if (folder.includes('ont') || folder.includes('onu') || folder.includes('pelanggan')) type = 'ONT';
+
+      // 5. Simpan sesuai tipe
+      if (type === 'ODP' || type === 'ODC') {
+        const existing = infraData.find(i => i.name === name);
+        if (!existing) {
+          const newOdp = {
+            id: 'odp_' + Math.random().toString(36).substr(2, 9),
+            name,
+            coordinates: [lat, lng],
+            maxPorts: type === 'ODC' ? 8 : 8,
+            type
+          };
+          infraData.push(newOdp);
+          imported++;
+          items.push({ name, type, lat, lng });
+        } else {
+          existing.coordinates = [lat, lng];
+          imported++;
+          items.push({ name, type, lat, lng, updated: true });
+        }
+      } else {
+        // Simpan sebagai koordinat custom (titik jalan, ONT tanpa SN, dll)
+        const pointId = 'kml_' + name.replace(/\s+/g, '_').toLowerCase().substr(0, 30);
+        if (!coordsStore[pointId]) {
+          coordsStore[pointId] = { coords: [lat, lng], name, type };
+          imported++;
+          items.push({ name, type, lat, lng });
+        } else {
+          coordsStore[pointId].coords = [lat, lng];
+          imported++;
+          items.push({ name, type, lat, lng, updated: true });
+        }
+      }
+    });
+
+    // 6. Simpan ke disk
+    saveJSON(INFRA_FILE, infraData);
+    saveJSON(COORDS_FILE, coordsStore);
+
+    addAuditLog('System', 'info', `KML Import: ${imported} items berhasil diimpor dari ${req.file.originalname}`, req.session?.userId || 'admin');
+    io.emit('infraUpdated');
+
+    console.log(`[KML Import] ✅ Imported: ${imported}, Skipped: ${skipped}`);
+    res.json({ success: true, imported, skipped, total: allPlacemarks.length, items: items.slice(0, 50) });
+
+  } catch (err) {
+    console.error('[KML Import Error]', err.message);
+    res.status(500).json({ error: 'Gagal memproses file KML: ' + err.message });
+  }
 });
 
 // ─── GET /api/olt/status  (SNMP Polling) ─────────────────────────────────────
@@ -1147,6 +1300,87 @@ app.get('/api/logs', requireAuth, async (req, res) => {
   res.json(auditLogs.slice(0, 100));
 });
 
+// ─── GET /api/devices/:id (Single Device) ────────────────────────────────────
+app.get('/api/devices/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const client = getAcsClient();
+    const projection = [
+      '_id', '_lastInform', '_tags',
+      'VirtualParameters',
+      'InternetGatewayDevice.DeviceInfo',
+      'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig',
+      'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig',
+      'InternetGatewayDevice.WANDevice.1.WANConnectionDevice',
+      'InternetGatewayDevice.LANDevice.1.WLANConfiguration',
+      'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig',
+      'Device.DeviceInfo', 'Device.IP.Interface',
+      'Device.PPP.Interface', 'Device.Optical.Interface', 'Device.WiFi'
+    ].join(',');
+    const response = await client.get(`/devices/${encodeURIComponent(id)}?projection=${projection}`);
+    res.json(mapDevice(response.data));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/debug/device/:id (Raw GenieACS data — for F609 diagnosis) ──────
+app.get('/api/debug/device/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const client = getAcsClient();
+    const response = await client.get(`/devices/${encodeURIComponent(id)}`);
+    const raw = response.data;
+
+    // Extract useful diagnostic info: list all top-level keys and WANDevice sub-keys
+    const topKeys = Object.keys(raw);
+    const wanDevice = raw?.InternetGatewayDevice?.WANDevice?.['1'] || {};
+    const wanConnDevice = wanDevice?.WANConnectionDevice || {};
+    const wanConnIndices = Object.keys(wanConnDevice);
+    
+    // For each WANConnectionDevice index, show PPP/IP connections
+    const wanConnSummary = wanConnIndices.map(idx => {
+      const conn = wanConnDevice[idx];
+      const ppp = conn?.WANPPPConnection || {};
+      const ip = conn?.WANIPConnection || {};
+      return {
+        index: idx,
+        pppIndices: Object.keys(ppp),
+        ipIndices: Object.keys(ip),
+        pppUser: Object.values(ppp)[0]?.Username?._value || null,
+        pppIp: Object.values(ppp)[0]?.ExternalIPAddress?._value || null,
+      };
+    });
+
+    const huaweiGpon = wanDevice?.X_HUAWEI_GponInterfaceConfig || {};
+    const virtualParams = raw?.VirtualParameters || {};
+    const wlanConfig = raw?.InternetGatewayDevice?.LANDevice?.['1']?.WLANConfiguration || {};
+
+    res.json({
+      id,
+      topLevelKeys: topKeys,
+      model: raw?.InternetGatewayDevice?.DeviceInfo?.ModelName?._value || '?',
+      serialNumber: raw?.InternetGatewayDevice?.DeviceInfo?.SerialNumber?._value || '?',
+      lastInform: raw?._lastInform,
+      wanConnectionDeviceIndices: wanConnIndices,
+      wanConnectionSummary: wanConnSummary,
+      huaweiGponKeys: Object.keys(huaweiGpon),
+      rxPowerRaw: huaweiGpon?.RxPower?._value || null,
+      txPowerRaw: huaweiGpon?.TxPower?._value || null,
+      virtualParameterKeys: Object.keys(virtualParams),
+      rxPowerVirtual: virtualParams?.RXPower?._value || null,
+      wlanConfigIndices: Object.keys(wlanConfig),
+      ssid_1: wlanConfig?.['1']?.SSID?._value || null,
+      wifiPass_1_psk: wlanConfig?.['1']?.PreSharedKey?.['1']?.PreSharedKey?._value || null,
+      wifiPass_1_kp: wlanConfig?.['1']?.KeyPassphrase?._value || null,
+      ssid_5: wlanConfig?.['5']?.SSID?._value || null,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 async function fetchDevices() {
   try {
     const acsCfg = loadConfig();
@@ -1155,7 +1389,23 @@ async function fetchDevices() {
       auth: { username: acsCfg.username, password: acsCfg.password },
       timeout: 10000
     });
-    const response = await client.get('/devices?projection=_id,_lastInform,_tags,InternetGatewayDevice.DeviceInfo,InternetGatewayDevice.WANDevice,InternetGatewayDevice.LANDevice.1.WLANConfiguration,InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Stats');
+    // Same complete projection as /api/devices — includes VirtualParameters & Huawei paths
+    const projection = [
+      '_id', '_lastInform', '_tags',
+      'VirtualParameters',
+      'InternetGatewayDevice.DeviceInfo',
+      'InternetGatewayDevice.WANDevice.1.X_HUAWEI_GponInterfaceConfig',
+      'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig',
+      'InternetGatewayDevice.WANDevice.1.WANConnectionDevice',
+      'InternetGatewayDevice.LANDevice.1.WLANConfiguration',
+      'InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig',
+      'Device.DeviceInfo',
+      'Device.IP.Interface',
+      'Device.PPP.Interface',
+      'Device.Optical.Interface',
+      'Device.WiFi'
+    ].join(',');
+    const response = await client.get(`/devices?projection=${projection}`);
     return response.data;
   } catch (error) {
     console.error(`[Sync Error] ${error.message}`);
