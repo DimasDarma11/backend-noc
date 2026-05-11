@@ -76,34 +76,38 @@ function addVpnLog(msg) {
 }
 
 app.get('/api/system/status', async (req, res) => {
-  let config = { vpn: {} };
+  let config = { vpn: {}, mikrotiks: [] };
   try { config = loadConfig(); } catch (e) {}
   
-  // 1. ACS Check (Pakai Axios agar stabil & support SSL/CORS)
-  let acsStatus = 'disconnected';
+  // 1. ACS Check
+  let acsStatus = 'offline';
   if (config.url) {
     try {
       const testUrl = config.url.endsWith('/') ? config.url : `${config.url}/`;
-      // Timeout pendek agar Dashboard tidak macet
       const acsRes = await axios.get(testUrl, { timeout: 3000 }).catch(() => null);
       if (acsRes && (acsRes.status === 200 || acsRes.status === 401)) acsStatus = 'online';
-      else acsStatus = 'offline';
-    } catch (e) { acsStatus = 'offline'; }
+    } catch (e) {}
   }
 
-  // 2. OLT Status (Gunakan data dari Mikrotik)
+  // 2. OLT Status
   let oltStatus = 'offline';
   const oltKeys = Object.keys(oltPushStatus);
   if (oltKeys.length > 0) {
-    // Jika ada salah satu OLT yang online di memori, tampilkan Online
     oltStatus = oltKeys.some(ip => oltPushStatus[ip].status === 'online') ? 'online' : 'offline';
   }
 
+  // 3. Mikrotik Status
+  const mikrotikStatus = config.mikrotiks?.length > 0 ? 'online' : 'offline';
+
+  // 4. VPN Status
+  const vpnStatus = config.vpn?.status || (config.vpn?.enabled ? 'dialing' : 'offline');
+
   res.json({
-    acs: acsStatus,
-    olt: oltStatus,
+    acsStatus,
+    oltStatus,
+    vpnStatus,
+    mikrotikStatus,
     oltDetail: oltPushStatus || {}, 
-    vpn: config.vpn?.status || 'disconnected',
     vpnLog: globalVpnLog || ''
   });
 });
