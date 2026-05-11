@@ -238,6 +238,20 @@ PersistentKeepalive = 25
             config.vpn.status = 'disconnected';
           } else {
             addVpnLog(`[SUCCESS] WireGuard Berhasil Terhubung!`);
+            
+            // --- FORCE ROUTE TO OLT ---
+            if (config.oltIp) {
+              const oltHost = config.oltIp.split(':')[0];
+              addVpnLog(`[SYSTEM] Menambahkan jalur paksa (Route) ke OLT ${oltHost}...`);
+              exec(`sudo ip route add ${oltHost}/32 dev wg0`, (routeErr) => {
+                if (routeErr) {
+                  addVpnLog(`[WARN] Jalur sudah ada atau gagal dibuat: ${routeErr.message}`);
+                } else {
+                  addVpnLog(`[SUCCESS] Jalur OLT berhasil di-bypass lewat VPN.`);
+                }
+              });
+            }
+
             addVpnLog(`[INFO] OLT sekarang dapat dijangkau via jalur VPN.`);
             config.vpn.status = 'connected';
           }
