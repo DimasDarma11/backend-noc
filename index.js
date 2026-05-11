@@ -81,60 +81,77 @@ app.get('/api/system/status', async (req, res) => {
   
   const isWin = process.platform === 'win32';
   const { execSync } = require('child_process');
+  let acsReason = '';
+  let vpnReason = '';
 
-  // 1. ACS Check (Real Reachability)
+  // 1. ACS Check
   let acsStatus = 'offline';
   if (config.url) {
     try {
-      const testUrl = config.url.endsWith('/') ? config.url : `${config.url}/`;
-      const acsRes = await axios.get(testUrl, { timeout: 2000 }).catch(() => null);
+      const urlObj = new URL(config.url.startsWith('http') ? config.url : `http://${config.url}`);
+      const ip = urlObj.hostname;
+      
+      // Try Axios first
+      const acsRes = await axios.get(config.url, { timeout: 2000 }).catch(() => null);
       if (acsRes && (acsRes.status === 200 || acsRes.status === 401)) {
         acsStatus = 'online';
+        acsReason = 'HTTP Response OK';
       } else {
-        const ip = config.url.replace('http://', '').replace('https://', '').split(':')[0].split('/')[0];
+        // Ping Fallback
         const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
         try {
           execSync(pingCmd, { stdio: 'ignore' });
           acsStatus = 'online';
-        } catch(e) {}
+          acsReason = 'ICMP Reachable (VPN Up)';
+        } catch(e) {
+          acsReason = 'HTTP & ICMP Unreachable';
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      acsReason = 'Invalid URL or DNS Error';
+    }
   }
 
-  // 2. OLT Status (Real-time memory check)
+  // 2. OLT Status
   let oltStatus = 'offline';
   const oltKeys = Object.keys(oltPushStatus);
   if (oltKeys.length > 0) {
     oltStatus = oltKeys.some(ip => oltPushStatus[ip].status === 'online') ? 'online' : 'offline';
   }
 
-  // 3. VPN Status (Real Interface Check)
+  // 3. VPN Status
   let vpnStatus = 'offline';
   try {
-    const ifaceCmd = isWin ? 'ipconfig' : 'ip addr show';
+    const ifaceCmd = isWin ? 'ipconfig /all' : 'ip addr show';
     const interfaces = execSync(ifaceCmd).toString().toLowerCase();
-    // Cek keberadaan keyword tunnel/ppp/wireguard
-    if (interfaces.includes('ppp') || interfaces.includes('wg') || interfaces.includes('tun') || interfaces.includes('wireguard') || interfaces.includes('tap')) {
+    
+    // Keywords for detection
+    const vpnKeywords = ['ppp', 'wg0', 'tun', 'tap', 'wireguard', 'vpn', 'miniport', 'fortinet', 'zerotier', 'tailscale'];
+    const found = vpnKeywords.find(k => interfaces.includes(k));
+    
+    if (found) {
       vpnStatus = 'online';
+      vpnReason = `Active Adapter Found (${found})`;
     } else if (config.vpn?.enabled) {
       vpnStatus = 'dialing';
+      vpnReason = 'Service enabled, but interface not found';
+    } else {
+      vpnReason = 'VPN Interface not detected';
     }
   } catch (e) {
     vpnStatus = config.vpn?.status || 'offline';
+    vpnReason = 'Command execution failed';
   }
 
-  // 4. Mikrotik Status (Reachability Check)
+  // 4. Mikrotik Status
   let mikrotikStatus = 'offline';
   if (config.mikrotiks?.length > 0) {
-    const firstMk = config.mikrotiks[0];
-    const ip = firstMk.mkIp.split(':')[0];
-    const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
     try {
+      const ip = config.mikrotiks[0].mkIp.split(':')[0];
+      const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
       execSync(pingCmd, { stdio: 'ignore' });
       mikrotikStatus = 'online';
-    } catch (e) {
-      mikrotikStatus = 'offline';
-    }
+    } catch (e) {}
   }
 
   res.json({
@@ -142,6 +159,8 @@ app.get('/api/system/status', async (req, res) => {
     oltStatus,
     vpnStatus,
     mikrotikStatus,
+    acsReason,
+    vpnReason,
     oltDetail: oltPushStatus || {}, 
     vpnLog: globalVpnLog || ''
   });
