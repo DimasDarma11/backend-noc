@@ -113,7 +113,7 @@ app.get('/api/system/status', async (req, res) => {
 
   // 2. OLT Status
   let oltStatus = 'offline';
-  let oltReason = 'Monitoring push status...';
+  oltReason = 'Monitoring push status...';
   if (config.oltIp) {
     try {
       const ip = config.oltIp.split(':')[0];
