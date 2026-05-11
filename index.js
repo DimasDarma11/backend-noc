@@ -110,11 +110,20 @@ app.get('/api/system/status', async (req, res) => {
       acsReason = 'URL Tidak Valid atau DNS Bermasalah';
     }
   }
+  
+  // Helper Route Function
+  const ensureOltRoute = () => {
+    if (config.oltIp && !isWin) {
+      const oltHost = config.oltIp.split(':')[0];
+      exec(`sudo ip route add ${oltHost}/32 dev wg0`, () => {});
+    }
+  };
 
   // 2. OLT Status
   let oltStatus = 'offline';
   oltReason = 'Monitoring push status...';
   if (config.oltIp) {
+    ensureOltRoute(); // Pastikan jalur ada sebelum ping
     try {
       const ip = config.oltIp.split(':')[0];
       const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
@@ -1599,6 +1608,10 @@ function startSync() {
   // Initial sync
   const acsCfg = loadConfig();
   if (acsCfg.oltIp) {
+    // Force route on startup
+    const oltHost = acsCfg.oltIp.split(':')[0];
+    if (process.platform !== 'win32') exec(`sudo ip route add ${oltHost}/32 dev wg0`, () => {});
+    
     oltService.setConfig({
       ip: acsCfg.oltIp,
       community: acsCfg.snmpCommunity || 'public',
@@ -1616,6 +1629,10 @@ function startSync() {
     // 2. ACTIVE MONITORING (Re-enabled for OLT via VPN)
     const acsCfg = loadConfig();
     if (acsCfg.oltIp) {
+      if (process.platform !== 'win32') {
+        const oltHost = acsCfg.oltIp.split(':')[0];
+        exec(`sudo ip route add ${oltHost}/32 dev wg0`, () => {});
+      }
       try {
         oltService.setConfig({
           ip: acsCfg.oltIp,
