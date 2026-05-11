@@ -1264,6 +1264,92 @@ app.delete('/api/mikrotik/active/:id', requireAuth, async (req, res) => {
 
 
 
+app.post('/api/devices/:id/config', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const config = req.body;
+  try {
+    const acsCfg = loadConfig();
+    const client = axios.create({
+      baseURL: acsCfg.url,
+      auth: { username: acsCfg.username, password: acsCfg.password },
+      timeout: 10000
+    });
+
+    const tasks = [];
+
+    // 1. Metadata: Customer Name (Tags)
+    if (config.customerName) {
+      await client.post(`/devices/${encodeURIComponent(id)}/tags`, { name: `CUSTOMER:${config.customerName}` });
+    }
+
+    // 2. PPPOE Username & Password (Universal for ZTE/Huawei)
+    if (config.pppoeUser) {
+      tasks.push({ 
+        name: 'setParameterValues', 
+        parameterValues: [
+          ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username", config.pppoeUser],
+          ["Device.PPP.Interface.1.Username", config.pppoeUser] // TR-181
+        ] 
+      });
+    }
+
+    // 3. WiFi 2.4G Settings
+    if (config.ssid) {
+      tasks.push({
+        name: 'setParameterValues',
+        parameterValues: [
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID", config.ssid],
+          ["Device.WiFi.SSID.1.SSID", config.ssid]
+        ]
+      });
+    }
+    if (config.wifiPassword) {
+      tasks.push({
+        name: 'setParameterValues',
+        parameterValues: [
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey", config.wifiPassword],
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase", config.wifiPassword],
+          ["Device.WiFi.AccessPoint.1.Security.KeyPassphrase", config.wifiPassword]
+        ]
+      });
+    }
+
+    // 4. WiFi 5G Settings (Index 5 for ZTE, 9 for Huawei, or 2 for TR-181)
+    if (config.ssid5g) {
+      tasks.push({
+        name: 'setParameterValues',
+        parameterValues: [
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.SSID", config.ssid5g],
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.9.SSID", config.ssid5g],
+          ["Device.WiFi.SSID.2.SSID", config.ssid5g]
+        ]
+      });
+    }
+    if (config.wifiPassword5g) {
+      tasks.push({
+        name: 'setParameterValues',
+        parameterValues: [
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey", config.wifiPassword5g],
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.KeyPassphrase", config.wifiPassword5g],
+          ["InternetGatewayDevice.LANDevice.1.WLANConfiguration.9.PreSharedKey.1.PreSharedKey", config.wifiPassword5g],
+          ["Device.WiFi.AccessPoint.2.Security.KeyPassphrase", config.wifiPassword5g]
+        ]
+      });
+    }
+
+    // 5. Submit all tasks to GenieACS
+    for (const task of tasks) {
+      await client.post(`/devices/${encodeURIComponent(id)}/tasks?connection_request`, task);
+    }
+
+    addAuditLog('Device', 'info', `Config updated for device: ${id} (WiFi 2.4/5G & PPPOE)`, req.session.user);
+    res.json({ success: true, message: 'Configuration tasks queued' });
+  } catch (error) {
+    console.error(`[Config Error] ${error.message}`);
+    res.status(500).json({ error: 'Failed to update configuration: ' + error.message });
+  }
+});
+
 app.post('/api/devices/:id/reboot', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
