@@ -115,7 +115,15 @@ app.get('/api/system/status', async (req, res) => {
   const ensureOltRoute = () => {
     if (config.oltIp && !isWin) {
       const oltHost = config.oltIp.split(':')[0];
-      exec(`sudo ip route add ${oltHost}/32 dev wg0`, () => {});
+      exec(`sudo ip route add ${oltHost}/32 dev wg0`, (err, stdout, stderr) => {
+        if (err) {
+          if (!stderr.includes('File exists')) {
+            console.error(`[ROUTE_ERROR] Gagal nambah jalur ke ${oltHost}: ${stderr || err.message}`);
+          }
+        } else {
+          console.log(`[ROUTE_SUCCESS] Jalur ke ${oltHost} via wg0 berhasil dipasang.`);
+        }
+      });
     }
   };
 
@@ -1607,6 +1615,11 @@ function startSync() {
   
   // Initial sync
   const acsCfg = loadConfig();
+  console.log('[SYSTEM_INFO] Checking network interfaces...');
+  exec('ip addr show | grep -E "wg|tun|ppp|tap"', (err, stdout) => {
+    console.log(`[SYSTEM_INFO] Active VPN Interfaces:\n${stdout || 'None found'}`);
+  });
+
   if (acsCfg.oltIp) {
     // Force route on startup
     const oltHost = acsCfg.oltIp.split(':')[0];
