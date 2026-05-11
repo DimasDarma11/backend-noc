@@ -184,6 +184,17 @@ class OltService {
   async getChassisStatus() {
     if (!this.ip) throw new Error('OLT IP not configured');
     
+    // Diagnostic Ping
+    const isWin = process.platform === 'win32';
+    const { execSync } = require('child_process');
+    const pingCmd = isWin ? `ping -n 1 -w 1000 ${this.ip}` : `ping -c 1 -W 1 ${this.ip}`;
+    try {
+      execSync(pingCmd, { stdio: 'ignore' });
+      console.log(`[OLT_DEBUG] [PING_SUCCESS] OLT ${this.ip} is reachable via ICMP.`);
+    } catch (e) {
+      console.warn(`[OLT_DEBUG] [PING_FAILED] OLT ${this.ip} is NOT reachable via ICMP. Route might be broken.`);
+    }
+
     let uptime = 'N/A', model = 'ZTE ZXA10 C300', snmpOnline = false;
     let rxRate = 0, txRate = 0;
 
