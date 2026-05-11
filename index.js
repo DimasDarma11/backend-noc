@@ -81,8 +81,10 @@ app.get('/api/system/status', async (req, res) => {
   
   const isWin = process.platform === 'win32';
   const { execSync } = require('child_process');
-  let acsReason = '';
-  let vpnReason = '';
+  let acsReason = 'Checking connectivity...';
+  let vpnReason = 'Detecting interfaces...';
+  let oltReason = 'Monitoring push status...';
+  let mikrotikReason = 'Verifying router reachability...';
 
   // 1. ACS Check
   let acsStatus = 'offline';
@@ -90,25 +92,22 @@ app.get('/api/system/status', async (req, res) => {
     try {
       const urlObj = new URL(config.url.startsWith('http') ? config.url : `http://${config.url}`);
       const ip = urlObj.hostname;
-      
-      // Try Axios first
       const acsRes = await axios.get(config.url, { timeout: 2000 }).catch(() => null);
       if (acsRes && (acsRes.status === 200 || acsRes.status === 401)) {
         acsStatus = 'online';
-        acsReason = 'HTTP Response OK';
+        acsReason = 'HTTP Response OK (200/401)';
       } else {
-        // Ping Fallback
         const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
         try {
           execSync(pingCmd, { stdio: 'ignore' });
           acsStatus = 'online';
-          acsReason = 'ICMP Reachable (VPN Up)';
+          acsReason = 'ICMP Ping Reachable (Jalur VPN Aktif)';
         } catch(e) {
-          acsReason = 'HTTP & ICMP Unreachable';
+          acsReason = 'Koneksi Gagal: HTTP Timeout & Ping RTO';
         }
       }
     } catch (e) {
-      acsReason = 'Invalid URL or DNS Error';
+      acsReason = 'URL Tidak Valid atau DNS Bermasalah';
     }
   }
 
@@ -116,7 +115,11 @@ app.get('/api/system/status', async (req, res) => {
   let oltStatus = 'offline';
   const oltKeys = Object.keys(oltPushStatus);
   if (oltKeys.length > 0) {
-    oltStatus = oltKeys.some(ip => oltPushStatus[ip].status === 'online') ? 'online' : 'offline';
+    const isOnline = oltKeys.some(ip => oltPushStatus[ip].status === 'online');
+    oltStatus = isOnline ? 'online' : 'offline';
+    oltReason = isOnline ? 'OLT Push Active via Mikrotik' : 'All OLTs reported offline';
+  } else {
+    oltReason = 'No OLT data pushed from Mikrotik scripts';
   }
 
   // 3. VPN Status
@@ -124,23 +127,21 @@ app.get('/api/system/status', async (req, res) => {
   try {
     const ifaceCmd = isWin ? 'ipconfig /all' : 'ip addr show';
     const interfaces = execSync(ifaceCmd).toString().toLowerCase();
-    
-    // Keywords for detection
     const vpnKeywords = ['ppp', 'wg0', 'tun', 'tap', 'wireguard', 'vpn', 'miniport', 'fortinet', 'zerotier', 'tailscale'];
     const found = vpnKeywords.find(k => interfaces.includes(k));
     
     if (found) {
       vpnStatus = 'online';
-      vpnReason = `Active Adapter Found (${found})`;
+      vpnReason = `VPN Interface Aktif Terdeteksi (${found})`;
     } else if (config.vpn?.enabled) {
       vpnStatus = 'dialing';
-      vpnReason = 'Service enabled, but interface not found';
+      vpnReason = 'Mencoba dial... (Interface belum up)';
     } else {
-      vpnReason = 'VPN Interface not detected';
+      vpnReason = 'VPN Dimatikan di Config';
     }
   } catch (e) {
     vpnStatus = config.vpn?.status || 'offline';
-    vpnReason = 'Command execution failed';
+    vpnReason = 'Gagal mengecek interface sistem';
   }
 
   // 4. Mikrotik Status
@@ -151,7 +152,12 @@ app.get('/api/system/status', async (req, res) => {
       const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
       execSync(pingCmd, { stdio: 'ignore' });
       mikrotikStatus = 'online';
-    } catch (e) {}
+      mikrotikReason = `${config.mikrotiks.length} Router Terdaftar & Reachable`;
+    } catch (e) {
+      mikrotikReason = 'Router IP Tidak Dapat Diping';
+    }
+  } else {
+    mikrotikReason = 'Belum ada router yang ditambahkan';
   }
 
   res.json({
@@ -161,6 +167,8 @@ app.get('/api/system/status', async (req, res) => {
     mikrotikStatus,
     acsReason,
     vpnReason,
+    oltReason,
+    mikrotikReason,
     oltDetail: oltPushStatus || {}, 
     vpnLog: globalVpnLog || ''
   });
