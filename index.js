@@ -113,13 +113,26 @@ app.get('/api/system/status', async (req, res) => {
 
   // 2. OLT Status
   let oltStatus = 'offline';
+  let oltReason = 'Monitoring push status...';
+  if (config.oltIp) {
+    try {
+      const ip = config.oltIp.split(':')[0];
+      const pingCmd = isWin ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
+      try {
+        execSync(pingCmd, { stdio: 'ignore' });
+        // Jika ping sukses tapi SNMP gagal, berarti masalah di Protocol (SNMP/Telnet)
+        oltReason = 'OLT IP Reachable (Ping OK), checking SNMP/Telnet...';
+      } catch (e) {
+        oltReason = 'OLT IP Unreachable via VPN (RTO)';
+      }
+    } catch (e) {}
+  }
+
   const oltKeys = Object.keys(oltPushStatus);
   if (oltKeys.length > 0) {
     const isOnline = oltKeys.some(ip => oltPushStatus[ip].status === 'online');
     oltStatus = isOnline ? 'online' : 'offline';
-    oltReason = isOnline ? 'OLT Push Active via Mikrotik' : 'All OLTs reported offline';
-  } else {
-    oltReason = 'No OLT data pushed from Mikrotik scripts';
+    if (isOnline) oltReason = 'OLT Data Sync Active';
   }
 
   // 3. VPN Status
@@ -270,6 +283,7 @@ app.post('/api/vpn/clear-log', (req, res) => {
     config.vpn.log = '';
     saveConfig(config);
   }
+  
   res.json({ success: true });
 });
 
@@ -600,6 +614,17 @@ app.post('/api/config', requireAuth, (req, res) => {
   if (updates.snmpPort) newConfig.snmpPort = parseInt(updates.snmpPort) || 161;
 
   saveConfig(newConfig);
+  
+  // Update OLT service immediately with new credentials
+  if (newConfig.oltIp) {
+    oltService.setConfig({
+      ip: newConfig.oltIp,
+      community: newConfig.snmpCommunity || 'public',
+      telnetUser: newConfig.telnetUser,
+      telnetPass: newConfig.telnetPass
+    });
+  }
+
   res.json({ success: true, message: 'Configuration saved successfully' });
 });
 
@@ -1558,6 +1583,15 @@ function startSync() {
   if (syncInterval) clearInterval(syncInterval);
   
   // Initial sync
+  const acsCfg = loadConfig();
+  if (acsCfg.oltIp) {
+    oltService.setConfig({
+      ip: acsCfg.oltIp,
+      community: acsCfg.snmpCommunity || 'public',
+      telnetUser: acsCfg.telnetUser,
+      telnetPass: acsCfg.telnetPass
+    });
+  }
   fetchDevices().then(recordHistory);
 
   syncInterval = setInterval(async () => {
@@ -1565,8 +1599,28 @@ function startSync() {
     const devices = await fetchDevices();
     recordHistory(devices);
     
-    // 2. SEMUA KONEKSI KE MIKROTIK & OLT DIMATIKAN TOTAL (SAFETY FIRST)
-    // Kita hanya mengandalkan PUSH dari Mikrotik (Pasif)
+    // 2. ACTIVE MONITORING (Re-enabled for OLT via VPN)
+    const acsCfg = loadConfig();
+    if (acsCfg.oltIp) {
+      try {
+        oltService.setConfig({
+          ip: acsCfg.oltIp,
+          community: acsCfg.snmpCommunity || 'public',
+          telnetUser: acsCfg.telnetUser,
+          telnetPass: acsCfg.telnetPass
+        });
+        const oltData = await oltService.getChassisStatus();
+        // Merge active data with push data
+        oltPushStatus[acsCfg.oltIp] = { 
+          ...oltData, 
+          status: oltData.status, 
+          lastUpdate: new Date().toISOString(),
+          isLive: true 
+        };
+      } catch (e) {
+        console.error(`[OLT_POLL_ERROR] ${e.message}`);
+      }
+    }
     
     io.emit('deviceUpdated');
   }, (loadConfig().syncInterval || 60) * 1000);
