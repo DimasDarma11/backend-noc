@@ -1421,6 +1421,50 @@ app.delete('/api/mikrotik/active/:id', requireAuth, async (req, res) => {
   }
 });
 
+let prevActiveUsers = {}; // RouterId -> List of active users names
+
+app.get('/api/mikrotik/dashboard', requireAuth, async (req, res) => {
+  const { id, refresh } = req.query;
+  const allData = getPersistentMkData();
+  
+  if (refresh !== 'true' && allData[`dashboard_${id}`]) {
+    return res.json(allData[`dashboard_${id}`]);
+  }
+
+  try {
+    const config = getMkConfig(id);
+    if (!config) throw new Error('Router tidak ditemukan.');
+    mikrotikService.setConfig(config);
+    const data = await mikrotikService.getDashboard();
+    
+    // -- Realtime Change Detection --
+    const currentActiveNames = data.active.map(a => a.name);
+    const previousNames = prevActiveUsers[id] || [];
+    
+    // Users who just connected
+    const connected = currentActiveNames.filter(name => !previousNames.includes(name));
+    // Users who just disconnected
+    const disconnected = previousNames.filter(name => !currentActiveNames.includes(name));
+
+    if (connected.length > 0 || disconnected.length > 0) {
+       io.emit('pppoeUpdate', { 
+         routerId: id, 
+         connected, 
+         disconnected,
+         totalActive: data.active.length 
+       });
+       prevActiveUsers[id] = currentActiveNames;
+    }
+
+    savePersistentMkData({ [`dashboard_${id}`]: data });
+    res.json(data);
+  } catch (error) {
+    if (allData[`dashboard_${id}`]) return res.json(allData[`dashboard_${id}`]);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 
 
 app.post('/api/devices/:id/config', requireAuth, async (req, res) => {
