@@ -579,9 +579,13 @@ function getAcsClient() {
     auth: config.username
       ? { username: config.username, password: config.password }
       : undefined,
-    timeout: 10000,
+    timeout: 30000,
   });
 }
+
+// Add global limit to GenieACS requests
+const ACS_LIMIT = 3000;
+
 
 // ─── Config endpoints ────────────────────────────────────────────────────────
 app.get('/api/config', requireAuth, (req, res) => {
@@ -965,7 +969,7 @@ app.get('/api/devices', requireAuth, async (req, res) => {
       'Device.Optical.Interface',
       'Device.WiFi'
     ].join(',');
-    const response = await client.get(`/devices?projection=${projection}`);
+    const response = await client.get(`/devices?projection=${projection}&limit=${ACS_LIMIT}`);
     const devices = response.data.map(d => mapDevice(d));
     res.json(devices);
   } catch (error) {
@@ -1024,7 +1028,7 @@ app.patch('/api/devices/:id/config', async (req, res) => {
 app.get('/api/stats', requireAuth, async (req, res) => {
   try {
     const client = getAcsClient();
-    const response = await client.get('/devices?projection=_id,_lastInform');
+    const response = await client.get(`/devices?projection=_id,_lastInform&limit=${ACS_LIMIT}`);
     const now = Date.now();
     const online = response.data.filter(d => d._lastInform && (now - new Date(d._lastInform).getTime()) < 5 * 60 * 1000).length;
     res.json({ total: response.data.length, online, offline: response.data.length - online });
