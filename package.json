@@ -15,17 +15,23 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "axios": "^1.6.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "express-rate-limit": "^8.5.1",
     "express-session": "^1.17.3",
+    "fast-xml-parser": "^5.7.3",
+    "multer": "^2.1.1",
     "net-snmp": "^3.26.3",
+    "node-routeros": "^1.6.9",
     "nodemon": "^3.0.1",
+    "p-queue": "^6.6.2",
+    "pino": "^10.3.1",
     "session-file-store": "^1.5.0",
     "socket.io": "^4.7.2",
-    "telnet-client": "^2.2.13",
-    "node-routeros": "^1.6.9"
+    "telnet-client": "^2.2.13"
   }
 }
