@@ -14,6 +14,7 @@ const mikrotikService = require('./mikrotikService');
 const multer = require('multer');
 const { XMLParser } = require('fast-xml-parser');
 const AdmZip = require('adm-zip');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 // Multer: simpan file upload di memory (tidak perlu ke disk)
@@ -43,6 +44,14 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   exposedHeaders: ['Set-Cookie']
 }));
+
+// API Rate Limiting to prevent DoS attacks on OLT and Backend
+const apiLimiter = rateLimit({
+  windowMs: 10000, // 10 seconds
+  max: 20, // Limit each IP to 20 requests per window
+  message: { error: 'Too many requests, please try again in 10 seconds' }
+});
+app.use('/api/', apiLimiter);
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
