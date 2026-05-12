@@ -115,7 +115,7 @@ app.get('/api/system/status', async (req, res) => {
   const ensureOltRoute = () => {
     if (config.oltIp && !isWin) {
       const oltHost = config.oltIp.split(':')[0];
-      exec(`sudo ip route add ${oltHost}/32 dev wg0`, (err, stdout, stderr) => {
+      exec(`ip route add ${oltHost}/32 dev wg0`, (err, stdout, stderr) => {
         if (err) {
           if (!stderr.includes('File exists')) {
             console.error(`[ROUTE_ERROR] Gagal nambah jalur ke ${oltHost}: ${stderr || err.message}`);
@@ -1098,9 +1098,37 @@ app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (
     allPlacemarks.forEach(pm => {
       const name = String(pm?.name || '').trim();
       const folder = String(pm?._parentFolder || '').trim().toLowerCase();
+      
+      // -- PARSE KML LINESTRINGS (CABLES/PATHS) --
+      if (pm?.LineString?.coordinates) {
+        const coordPairs = pm.LineString.coordinates.trim().split(/\s+/);
+        const path = [];
+        coordPairs.forEach(pair => {
+          const parts = pair.split(',');
+          const lng = parseFloat(parts[0]);
+          const lat = parseFloat(parts[1]);
+          if (!isNaN(lat) && !isNaN(lng)) path.push([lat, lng]);
+        });
+        
+        if (path.length > 1) {
+          const newItem = {
+            id: 'line_' + Math.random().toString(36).substr(2, 9),
+            name: name || 'KML Line',
+            path,
+            color: pm?.Style?.LineStyle?.color ? `#${pm.Style.LineStyle.color.substring(6,8)}${pm.Style.LineStyle.color.substring(4,6)}${pm.Style.LineStyle.color.substring(2,4)}` : '#000000',
+            type: 'LINE'
+          };
+          infraData.push(newItem);
+          imported++;
+          items.push({ name: newItem.name, type: 'LINE', lat: path[0][0], lng: path[0][1] });
+          return; // Selesai, tidak usah lanjut ke parsing Point
+        }
+      }
+
+      // -- PARSE KML POINTS (MARKERS) --
       const coordStr = pm?.Point?.coordinates || pm?.coordinates;
 
-      if (!coordStr || !name) { skipped++; return; }
+      if (!coordStr || (!name && type !== 'LINE')) { skipped++; return; }
 
       // KML koordinat: lng,lat,alt → kita butuh [lat, lng]
       const parts = String(coordStr).trim().split(',');
@@ -1615,15 +1643,15 @@ function startSync() {
   
   // Initial sync
   const acsCfg = loadConfig();
-  console.log('[SYSTEM_INFO] Checking network interfaces...');
-  exec('ip addr show | grep -E "wg|tun|ppp|tap"', (err, stdout) => {
-    console.log(`[SYSTEM_INFO] Active VPN Interfaces:\n${stdout || 'None found'}`);
+  console.log('[SYSTEM_INFO] Checking network status...');
+  exec('ip addr show wg0; ip route show', (err, stdout) => {
+    console.log(`[SYSTEM_INFO] Network State:\n${stdout || 'Error fetching state'}`);
   });
 
   if (acsCfg.oltIp) {
     // Force route on startup
     const oltHost = acsCfg.oltIp.split(':')[0];
-    if (process.platform !== 'win32') exec(`sudo ip route add ${oltHost}/32 dev wg0`, () => {});
+    if (process.platform !== 'win32') exec(`ip route add ${oltHost}/32 dev wg0`, () => {});
     
     oltService.setConfig({
       ip: acsCfg.oltIp,
@@ -1644,7 +1672,7 @@ function startSync() {
     if (acsCfg.oltIp) {
       if (process.platform !== 'win32') {
         const oltHost = acsCfg.oltIp.split(':')[0];
-        exec(`sudo ip route add ${oltHost}/32 dev wg0`, () => {});
+        exec(`ip route add ${oltHost}/32 dev wg0`, () => {});
       }
       try {
         oltService.setConfig({
