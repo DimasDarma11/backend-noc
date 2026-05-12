@@ -272,6 +272,16 @@ class OltService {
   }
 
   async _telnetExec(commands) {
+    const results = [];
+    const client = new Telnet();
+    
+    const execWithTimeout = async (cmd) => {
+      return Promise.race([
+        client.exec(cmd),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout executing ${cmd}`)), 8000))
+      ]);
+    };
+
     try {
       await client.connect({
         host: this.ip, port: 23,
@@ -280,18 +290,24 @@ class OltService {
         timeout: 10000, 
         execTimeout: 10000 
       });
+      
       console.log(`[OLT_DEBUG] Telnet connected to ${this.ip}. Running commands...`);
+      
+      // Sequence: enable -> password -> length 0 -> target commands
       await execWithTimeout('enable').catch(() => {});
       await execWithTimeout(this.enablePass).catch(() => {});
       await execWithTimeout('terminal length 0').catch(() => {});
+      
       for (const cmd of commands) {
         const out = await execWithTimeout(cmd);
         results.push({ cmd, output: out });
       }
-      await client.end();
+      
+      await client.end().catch(() => {});
     } catch (err) { 
-      console.error(`[OLT_DEBUG] Telnet Connection Failed: ${err.message}`);
-      await client.end().catch(() => {}); throw err; 
+      console.error(`[OLT_DEBUG] Telnet Connection Error: ${err.message}`);
+      try { await client.end(); } catch (e) {}
+      throw err; 
     }
     return results;
   }
