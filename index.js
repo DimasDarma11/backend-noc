@@ -21,6 +21,7 @@ require('dotenv').config();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const app = express();
+app.set('trust proxy', 1); // Trust first proxy (Railway/Nginx)
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: true, methods: ["GET", "POST"], credentials: true },
