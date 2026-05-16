@@ -610,7 +610,7 @@ async function recordHistory(devices) {
     if (prevStatus && prevStatus !== currentStatus) {
       const severity = isOnline ? 'success' : 'critical';
       const message = isOnline ? `Device ${sn} is back ONLINE` : `Device ${sn} went OFFLINE`;
-      addAuditLog('Device', severity, message, 'System', isOnline ? 'ONLINE' : 'OFFLINE', id);
+      await addAuditLog('Device', severity, message, 'System', isOnline ? 'ONLINE' : 'OFFLINE', id);
     }
     deviceStatusStore[id] = currentStatus;
 
@@ -639,7 +639,7 @@ async function recordHistory(devices) {
   // 4. Check ODP Health based on child status
   for (const [odpId, stats] of odpMap.entries()) {
     if (stats.total > 0 && stats.total === stats.offline) {
-      addAuditLog('Network', 'critical', `MASS FAILURE: All devices in ODP ${odpId} are OFFLINE. Possible Fiber Cut.`, 'System', 'MASS_FAILURE', odpId);
+      await addAuditLog('Network', 'critical', `MASS FAILURE: All devices in ODP ${odpId} are OFFLINE. Possible Fiber Cut.`, 'System', 'MASS_FAILURE', odpId);
       // Update ODP status in DB
       await topologyService.upsertNode({ id: odpId, signal_status: 'critical', metadata: { fault: 'MASS_OFFLINE', timestamp: now } });
     }
@@ -1231,18 +1231,18 @@ app.post('/api/infrastructure', requireAuth, async (req, res) => {
   }
 });
 
-app.delete('/api/infrastructure/:id', requireAuth, (req, res) => {
+app.delete('/api/infrastructure/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const odp = infraData.find(i => i.id === id);
   infraData = infraData.filter(i => i.id !== id);
   saveJSON(INFRA_FILE, infraData);
-  addAuditLog('Infrastructure', 'warning', `Deleted ODP: ${odp?.name || id}`, req.session.userId, 'DELETE_ODP', id);
+  await addAuditLog('Infrastructure', 'warning', `Deleted ODP: ${odp?.name || id}`, req.session.userId, 'DELETE_ODP', id);
   io.emit('infraUpdated');
   res.json({ success: true });
 });
 
 // ─── POST /api/infrastructure/import-kml ─────────────────────────────────────
-app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (req, res) => {
+app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diupload.' });
 
@@ -1343,7 +1343,7 @@ app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (
       } catch (e) { console.error('[KML_NODE_ERROR]', e.message); skipped++; }
     }
 
-    addAuditLog('System', 'info', `KML Import: ${imported} items berhasil diimpor`, req.session?.userId || 'admin', 'IMPORT_KML');
+    await addAuditLog('System', 'info', `KML Import: ${imported} items berhasil diimpor`, req.session?.userId || 'admin', 'IMPORT_KML');
     io.emit('infraUpdated');
 
     res.json({ success: true, imported, skipped, total: allPlacemarks.length, items: items.slice(0, 50) });
@@ -1395,7 +1395,7 @@ app.post('/api/olt/provision', requireAuth, async (req, res) => {
 
     oltService.setConfig({ ip, community: cfg.snmpCommunity, snmpPort: cfg.snmpPort, telnetUser, telnetPass });
     const output = await oltService.executeOmciCommand(commands);
-    addAuditLog('OLT', 'info', `OMCI Provision executed: ${commands.length} command(s)`, req.session.userId, 'PROVISION_ONT');
+    await addAuditLog('OLT', 'info', `OMCI Provision executed: ${commands.length} command(s)`, req.session.userId, 'PROVISION_ONT');
     res.json({ success: true, output });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1707,7 +1707,7 @@ app.post('/api/devices/:id/config', requireAuth, async (req, res) => {
       await client.post(`/devices/${encodeURIComponent(id)}/tasks?connection_request`, task);
     }
 
-    addAuditLog('Device', 'info', `Config updated for device: ${id}`, req.session.userId, 'UPDATE_CONFIG', id);
+    await addAuditLog('Device', 'info', `Config updated for device: ${id}`, req.session.userId, 'UPDATE_CONFIG', id);
     res.json({ success: true, message: 'Configuration tasks queued' });
   } catch (error) {
     console.error(`[Config Error] ${error.message}`);
@@ -1726,7 +1726,7 @@ app.post('/api/devices/:id/reboot', requireAuth, async (req, res) => {
     });
     // GenieACS Reboot Command
     await client.post(`/devices/${encodeURIComponent(id)}/tasks?connection_request`, { name: 'reboot' });
-    addAuditLog('Device', 'warning', `Reboot command sent to device: ${id}`, req.session.userId, 'REBOOT_DEVICE', id);
+    await addAuditLog('Device', 'warning', `Reboot command sent to device: ${id}`, req.session.userId, 'REBOOT_DEVICE', id);
     res.json({ success: true, message: 'Reboot command queued' });
   } catch (error) {
     console.error(`[Reboot Error] ${error.message}`);
