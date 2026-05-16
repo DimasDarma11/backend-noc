@@ -1330,8 +1330,12 @@ app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), a
       else if (folder.includes('ont') || folder.includes('onu')) type = 'ONT';
 
       try {
+        // Create deterministic ID based on coordinates to prevent duplicate KML uploads
+        const coordHash = Buffer.from(`${lat},${lng}`).toString('base64').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
+        const nodeId = (type === 'ODP' ? 'odp_' : 'pt_') + coordHash;
+
         await topologyService.upsertNode({
-          id: (type === 'ODP' ? 'odp_' : 'pt_') + Math.random().toString(36).substr(2, 7),
+          id: nodeId,
           name,
           type,
           lat,
