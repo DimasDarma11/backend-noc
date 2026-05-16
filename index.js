@@ -571,8 +571,8 @@ function recordHistory(devices) {
     const prevStatus = deviceStatusStore[id];
     const currentStatus = isOnline ? 'online' : 'offline';
 
+    const sn = getParam(d, 'InternetGatewayDevice.DeviceInfo.SerialNumber', 'Device.DeviceInfo.SerialNumber') || id;
     if (prevStatus && prevStatus !== currentStatus) {
-      const sn = getParam(d, 'InternetGatewayDevice.DeviceInfo.SerialNumber', 'Device.DeviceInfo.SerialNumber') || id;
       const severity = isOnline ? 'success' : 'critical';
       const message = isOnline ? `Device ${sn} is back ONLINE` : `Device ${sn} went OFFLINE`;
       addAuditLog('Device', severity, message);
@@ -1071,6 +1071,8 @@ app.post('/api/infrastructure', requireAuth, (req, res) => {
       addAuditLog('Infrastructure', 'info', `Updated ODP: ${name}`, req.session.user);
     }
   }
+  res.json({ success: true });
+});
 // ─── Topology Endpoints ───────────────────────────────────────────────────
 
 app.get('/api/topology', requireAuth, async (req, res) => {
