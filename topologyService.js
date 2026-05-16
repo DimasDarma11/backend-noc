@@ -1,66 +1,108 @@
-const fs = require('fs');
-const path = require('path');
-const topologyService = require('./topologyService');
+const { Pool } = require('pg');
+const format = require('pg-format');
+require('dotenv').config();
 
-const DATA_DIR = path.join(__dirname, 'data');
-const COORDS_FILE = path.join(DATA_DIR, 'coordinates.json');
-const INFRA_FILE = path.join(DATA_DIR, 'infrastructure.json');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-async function migrate() {
-  console.log('🚀 Starting migration...');
+const topologyService = {
+  // ─── Core Queries ──────────────────────────────────────────────────────────
+  
+  async getNodes() {
+    const res = await pool.query(`
+      SELECT id, name, type, ST_AsGeoJSON(location)::json as location, 
+             parent_id, signal_status, last_seen, metadata
+      FROM nodes
+    `);
+    return res.rows;
+  },
 
-  try {
-    // 1. Migrate Coordinates (mostly ONTs)
-    if (fs.existsSync(COORDS_FILE)) {
-      const coords = JSON.parse(fs.readFileSync(COORDS_FILE, 'utf8'));
-      for (const [id, [lat, lng]] of Object.entries(coords)) {
-        console.log(`Migrating node: ${id}`);
-        await topologyService.upsertNode({
-          id,
-          name: id,
-          type: id.includes('F6') || id.includes('HG') ? 'ONT' : 'ODP',
-          lat,
-          lng,
-          signal_status: 'unknown',
-          metadata: { migrated: true }
-        });
-      }
-    }
+  async getCables() {
+    const res = await pool.query(`
+      SELECT id, name, source_id, destination_id, ST_AsGeoJSON(path)::json as path,
+             cores, fiber_type, capacity_used, length_meters, estimated_loss_db, status, metadata
+      FROM cables
+    `);
+    return res.rows;
+  },
 
-    // 2. Migrate Infrastructure (ODPs, ODCs, etc.)
-    if (fs.existsSync(INFRA_FILE)) {
-      const infra = JSON.parse(fs.readFileSync(INFRA_FILE, 'utf8'));
-      for (const item of infra) {
-        console.log(`Migrating infrastructure: ${item.name || item.id}`);
-        await topologyService.upsertNode({
-          id: item.id,
-          name: item.name || item.id,
-          type: item.type || 'ODP',
-          lat: item.coordinates?.[0] || 0,
-          lng: item.coordinates?.[1] || 0,
-          parent_id: item.parentId || null,
-          metadata: item
-        });
+  async upsertNode(node) {
+    const { id, name, type, lat, lng, parent_id, signal_status, metadata } = node;
+    const query = `
+      INSERT INTO nodes (id, name, type, location, parent_id, signal_status, metadata)
+      VALUES ($1, $2, $3, ST_SetSRID(ST_MakePoint($5, $4), 4326), $6, $7, $8)
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        type = EXCLUDED.type,
+        location = EXCLUDED.location,
+        parent_id = EXCLUDED.parent_id,
+        signal_status = EXCLUDED.signal_status,
+        metadata = nodes.metadata || EXCLUDED.metadata,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *;
+    `;
+    const res = await pool.query(query, [id, name, type, lat, lng, parent_id, signal_status, JSON.stringify(metadata || {})]);
+    return res.rows[0];
+  },
+
+  async upsertCable(cable) {
+    const { name, source_id, destination_id, path, cores, fiber_type, length_meters, estimated_loss_db, status } = cable;
+    // path is expected to be an array of [lat, lng]
+    const lineString = `LINESTRING(${path.map(p => `${p[1]} ${p[0]}`).join(', ')})`;
+    const query = `
+      INSERT INTO cables (name, source_id, destination_id, path, cores, fiber_type, length_meters, estimated_loss_db, status)
+      VALUES ($1, $2, $3, ST_GeomFromText($4, 4326), $5, $6, $7, $8, $9)
+      RETURNING *;
+    `;
+    const res = await pool.query(query, [name, source_id, destination_id, lineString, cores, fiber_type, length_meters, estimated_loss_db, status]);
+    return res.rows[0];
+  },
+
+  // ─── Topology Logic ────────────────────────────────────────────────────────
+
+  async tracePath(nodeId) {
+    // Recursive query to trace path back to OLT
+    const query = `
+      WITH RECURSIVE path_trace AS (
+        -- Base case: the starting node
+        SELECT id, name, type, parent_id, 1 as depth
+        FROM nodes
+        WHERE id = $1
         
-        // If it's a cable/line, migrate to cables table
-        if (item.type === 'LINE' && item.path) {
-           await topologyService.upsertCable({
-             name: item.name,
-             source_id: item.sourceId,
-             destination_id: item.destId,
-             path: item.path,
-             status: 'normal'
-           });
-        }
-      }
-    }
+        UNION ALL
+        
+        -- Recursive step: find parent
+        SELECT n.id, n.name, n.type, n.parent_id, pt.depth + 1
+        FROM nodes n
+        JOIN path_trace pt ON n.id = pt.parent_id
+      )
+      SELECT * FROM path_trace ORDER BY depth DESC;
+    `;
+    const res = await pool.query(query, [nodeId]);
+    return res.rows;
+  },
 
-    console.log('✅ Migration completed successfully!');
-  } catch (err) {
-    console.error('❌ Migration failed:', err.message);
-  } finally {
-    process.exit();
+  async getImpactedNodes(failedNodeId) {
+    // Find all nodes downstream from a failed node
+    const query = `
+      WITH RECURSIVE downstream AS (
+        SELECT id, name, type, parent_id
+        FROM nodes
+        WHERE id = $1
+        
+        UNION ALL
+        
+        SELECT n.id, n.name, n.type, n.parent_id
+        FROM nodes n
+        JOIN downstream d ON n.parent_id = d.id
+      )
+      SELECT * FROM downstream;
+    `;
+    const res = await pool.query(query, [failedNodeId]);
+    return res.rows;
   }
-}
+};
 
-migrate();
+module.exports = topologyService;
