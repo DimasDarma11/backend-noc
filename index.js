@@ -414,12 +414,14 @@ const INFRA_FILE = path.join(DATA_DIR, 'infrastructure.json');
 // Initialize Auth
 if (!fs.existsSync(AUTH_FILE)) {
   const salt = bcrypt.genSaltSync(10);
-  const hashedPassword = bcrypt.hashSync('admin123', salt);
-  fs.writeFileSync(AUTH_FILE, JSON.stringify({ username: 'admin', password: hashedPassword }, null, 2));
+  const users = [
+    { username: 'admin', password: bcrypt.hashSync('admin123', salt), role: 'admin' },
+    { username: 'teknisi', password: bcrypt.hashSync('teknisi123', salt), role: 'teknisi' }
+  ];
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(users, null, 2));
   console.log('\n--- SECURITY INITIALIZED ---');
-  console.log('Username: admin');
-  console.log('Password: admin123');
-  console.log('Please change this on first login.');
+  console.log('Admin: admin / admin123');
+  console.log('Teknisi: teknisi / teknisi123');
   console.log('----------------------------\n');
 }
 
@@ -432,14 +434,27 @@ const requireAuth = (req, res, next) => {
   }
 };
 
+const requireRole = (roles) => (req, res, next) => {
+  if (req.session.userId && roles.includes(req.session.role)) {
+    next();
+  } else {
+    res.status(403).json({ error: 'Forbidden. Insufficient permissions.' });
+  }
+};
+
 // ─── Auth Endpoints ─────────────────────────────────────────────────────────
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   try {
-    const authData = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
-    if (username === authData.username && bcrypt.compareSync(password, authData.password)) {
-      req.session.userId = 'admin';
-      res.json({ success: true, message: 'Login successful' });
+    const users = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+    const user = Array.isArray(users) 
+      ? users.find(u => u.username === username)
+      : (users.username === username ? users : null); // Fallback for old format
+    
+    if (user && bcrypt.compareSync(password, user.password)) {
+      req.session.userId = user.username;
+      req.session.role = user.role || 'admin';
+      res.json({ success: true, message: 'Login successful', role: req.session.role });
     } else {
       res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
@@ -449,7 +464,22 @@ app.post('/api/login', (req, res) => {
 });
 
 app.get('/api/auth-status', (req, res) => {
-  res.json({ authenticated: !!req.session.userId });
+  res.json({ 
+    authenticated: !!req.session.userId,
+    role: req.session.role
+  });
+});
+
+app.get('/api/admin/users', requireAuth, requireRole(['admin']), (req, res) => {
+  try {
+    const users = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+    const safeUsers = Array.isArray(users) 
+      ? users.map(({ password, ...u }) => u)
+      : [{ username: users.username, role: 'admin' }];
+    res.json(safeUsers);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
 });
 
 app.post('/api/logout', (req, res) => {
@@ -537,27 +567,33 @@ let infraData = []; // Now managed by Postgres
 let coordsStore = {}; // Now managed by Postgres
 let deviceStatusStore = {}; // Tracks online/offline status for logging
 
-function addAuditLog(category, severity, message, user = 'System') {
-  const log = {
-    id: Date.now() + Math.random().toString(36).substr(2, 5),
-    timestamp: new Date().toISOString(),
-    category,
-    severity,
-    message,
-    user
-  };
-  auditLogs.unshift(log);
-  if (auditLogs.length > 500) auditLogs = auditLogs.slice(0, 500);
-  saveJSON(AUDIT_FILE, auditLogs);
-  io.emit('newLog', log);
+async function addAuditLog(category, severity, message, user = 'System', action = 'SYSTEM_EVENT', targetId = null, metadata = {}) {
+  try {
+    const log = await topologyService.addAuditLog({
+      user_id: user,
+      action: action,
+      target_id: targetId,
+      severity: severity,
+      message: message,
+      result: metadata.result || 'SUCCESS',
+      metadata: { ...metadata, category }
+    });
+    io.emit('newLog', log);
+    console.log(`[AUDIT] ${message} (${user})`);
+  } catch (err) {
+    console.error(`[AUDIT_ERROR] ${err.message}`);
+  }
 }
 
-function recordHistory(devices) {
+async function recordHistory(devices) {
   const now = new Date().toISOString();
   const currentTime = Date.now();
-  
-  devices.forEach(d => {
+  const odpMap = new Map(); // Track ODP health
+
+  for (const d of devices) {
     const id = d._id;
+    const sn = getParam(d, 'InternetGatewayDevice.DeviceInfo.SerialNumber', 'Device.DeviceInfo.SerialNumber') || id;
+    
     // 1. Record Signal History
     if (!signalHistory[id]) signalHistory[id] = [];
     const rx = normalizePower(getParam(d, 'VirtualParameters.RXPower', 'InternetGatewayDevice.WANDevice.1.X_GponInterafceConfig.RXPower'));
@@ -566,28 +602,48 @@ function recordHistory(devices) {
       if (signalHistory[id].length > 200) signalHistory[id].shift();
     }
 
-    // 2. Monitor Online/Offline status for Activity Logs
+    // 2. Monitor Online/Offline status
     const isOnline = d._lastInform ? (currentTime - new Date(d._lastInform).getTime()) < 5 * 60 * 1000 : false;
     const prevStatus = deviceStatusStore[id];
     const currentStatus = isOnline ? 'online' : 'offline';
 
-    const sn = getParam(d, 'InternetGatewayDevice.DeviceInfo.SerialNumber', 'Device.DeviceInfo.SerialNumber') || id;
     if (prevStatus && prevStatus !== currentStatus) {
       const severity = isOnline ? 'success' : 'critical';
       const message = isOnline ? `Device ${sn} is back ONLINE` : `Device ${sn} went OFFLINE`;
-      addAuditLog('Device', severity, message);
+      addAuditLog('Device', severity, message, 'System', isOnline ? 'ONLINE' : 'OFFLINE', id);
     }
     deviceStatusStore[id] = currentStatus;
 
     // 3. Sync with Topology (Postgres)
-    topologyService.upsertNode({
+    // We try to find parent from metadata or previous knowledge
+    const parentId = d.parentId || null; 
+    if (parentId) {
+      if (!odpMap.has(parentId)) odpMap.set(parentId, { total: 0, offline: 0 });
+      const stats = odpMap.get(parentId);
+      stats.total++;
+      if (!isOnline) stats.offline++;
+    }
+
+    await topologyService.upsertNode({
       id,
       name: sn,
       type: 'ONT',
+      lat: d.lat || 0,
+      lng: d.lng || 0,
+      parent_id: parentId,
       signal_status: currentStatus === 'offline' ? 'critical' : (getPowerStatus(rx) === 'bad' ? 'warning' : 'online'),
-      metadata: { last_seen: now, rx, tx: d.txPower }
-    }).catch(err => console.error('[TOPOLOGY_SYNC_ERROR]', err.message));
-  });
+      metadata: { last_seen: now, rx, tx: d.txPower, mac: getParam(d, 'InternetGatewayDevice.WANDevice.1.WANEthernetInterfaceConfig.MACAddress') }
+    });
+  }
+
+  // 4. Check ODP Health based on child status
+  for (const [odpId, stats] of odpMap.entries()) {
+    if (stats.total > 0 && stats.total === stats.offline) {
+      addAuditLog('Network', 'critical', `MASS FAILURE: All devices in ODP ${odpId} are OFFLINE. Possible Fiber Cut.`, 'System', 'MASS_FAILURE', odpId);
+      // Update ODP status in DB
+      await topologyService.upsertNode({ id: odpId, signal_status: 'critical', metadata: { fault: 'MASS_OFFLINE', timestamp: now } });
+    }
+  }
   
   saveJSON(HISTORY_FILE, signalHistory);
 }
@@ -1057,22 +1113,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/infrastructure', requireAuth, (req, res) => res.json(infraData));
-app.post('/api/infrastructure', requireAuth, (req, res) => {
-  const { id, name, coordinates, maxPorts } = req.body;
-  if (!id) {
-    const newOdp = { id: 'odp_' + Math.random().toString(36).substr(2, 9), name, coordinates, maxPorts };
-    infraData.push(newOdp);
-    addAuditLog('Infrastructure', 'info', `Added new ODP: ${name}`, req.session.user);
-  } else {
-    const idx = infraData.findIndex(i => i.id === id);
-    if (idx !== -1) {
-      infraData[idx] = { ...infraData[idx], name, coordinates, maxPorts };
-      addAuditLog('Infrastructure', 'info', `Updated ODP: ${name}`, req.session.user);
-    }
-  }
-  res.json({ success: true });
-});
+// Endpoints moved to Topology section
 // ─── Topology Endpoints ───────────────────────────────────────────────────
 
 app.get('/api/topology', requireAuth, async (req, res) => {
@@ -1126,19 +1167,47 @@ app.get('/api/topology/impact/:id', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/topology/trace/:id', requireAuth, async (req, res) => {
+  try {
+    const path = await topologyService.tracePath(req.params.id);
+    res.json(path);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/infrastructure', requireAuth, async (req, res) => {
   try {
-    const nodes = await topologyService.getNodes();
-    // Map to old format for backward compatibility
-    const oldFormat = nodes.map(n => ({
+    const [nodes, cables] = await Promise.all([
+      topologyService.getNodes(),
+      topologyService.getCables()
+    ]);
+    
+    // Map nodes to frontend format
+    const formattedNodes = nodes.map(n => ({
       id: n.id,
       name: n.name,
       type: n.type,
       coordinates: n.location ? [n.location.coordinates[1], n.location.coordinates[0]] : [0,0],
       parentId: n.parent_id,
+      signalStatus: n.signal_status,
       ...n.metadata
     }));
-    res.json(oldFormat);
+
+    // Map cables to frontend format
+    const formattedCables = cables.map(c => ({
+      id: c.id,
+      segmentId: c.segment_id,
+      name: c.name,
+      type: 'LINE',
+      cableType: c.type,
+      path: c.path ? c.path.coordinates.map(p => [p[1], p[0]]) : [],
+      sourceId: c.source_id,
+      destinationId: c.destination_id,
+      ...c.metadata
+    }));
+
+    res.json([...formattedNodes, ...formattedCables]);
   } catch (err) {
     res.json([]);
   }
@@ -1167,7 +1236,7 @@ app.delete('/api/infrastructure/:id', requireAuth, (req, res) => {
   const odp = infraData.find(i => i.id === id);
   infraData = infraData.filter(i => i.id !== id);
   saveJSON(INFRA_FILE, infraData);
-  addAuditLog('Infrastructure', 'warning', `Deleted ODP: ${odp?.name || id}`, req.session.user);
+  addAuditLog('Infrastructure', 'warning', `Deleted ODP: ${odp?.name || id}`, req.session.userId, 'DELETE_ODP', id);
   io.emit('infraUpdated');
   res.json({ success: true });
 });
@@ -1214,7 +1283,7 @@ app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (
     let skipped = 0;
     const items = [];
 
-    allPlacemarks.forEach(pm => {
+    for (const pm of allPlacemarks) {
       const name = String(pm?.name || '').trim();
       const folder = String(pm?._parentFolder || '').trim().toLowerCase();
       
@@ -1230,70 +1299,53 @@ app.post('/api/infrastructure/import-kml', requireAuth, upload.single('file'), (
         });
         
         if (path.length > 1) {
-          const newItem = {
-            id: 'line_' + Math.random().toString(36).substr(2, 9),
-            name: name || 'KML Line',
-            path,
-            color: pm?.Style?.LineStyle?.color ? `#${pm.Style.LineStyle.color.substring(6,8)}${pm.Style.LineStyle.color.substring(4,6)}${pm.Style.LineStyle.color.substring(2,4)}` : '#000000',
-            type: 'LINE'
-          };
-          infraData.push(newItem);
-          imported++;
-          items.push({ name: newItem.name, type: 'LINE', lat: path[0][0], lng: path[0][1] });
-          return; // Selesai, tidak usah lanjut ke parsing Point
+          try {
+            await topologyService.upsertCable({
+              name: name || 'KML Line',
+              path,
+              metadata: { color: pm?.Style?.LineStyle?.color, folder }
+            });
+            imported++;
+            items.push({ name: name || 'KML Line', type: 'LINE' });
+          } catch (e) { console.error('[KML_LINE_ERROR]', e.message); skipped++; }
+          continue; 
         }
       }
 
       // -- PARSE KML POINTS (MARKERS) --
       const coordStr = pm?.Point?.coordinates || pm?.coordinates;
+      if (!coordStr) { skipped++; continue; }
 
-      if (!coordStr || (!name && type !== 'LINE')) { skipped++; return; }
-
-      // KML koordinat: lng,lat,alt → kita butuh [lat, lng]
       const parts = String(coordStr).trim().split(',');
       const lng = parseFloat(parts[0]);
       const lat = parseFloat(parts[1]);
 
-      if (isNaN(lat) || isNaN(lng)) { skipped++; return; }
-      if (Math.abs(lat) > 90 || Math.abs(lng) > 180) { skipped++; return; }
+      if (isNaN(lat) || isNaN(lng)) { skipped++; continue; }
 
-      // 4. Deteksi tipe berdasarkan folder atau nama
       const nameLower = name.toLowerCase();
       let type = 'POINT';
-      if (folder.includes('odp') || nameLower.startsWith('odp') || nameLower.includes('-odp')) type = 'ODP';
+      if (folder.includes('odp') || nameLower.startsWith('odp')) type = 'ODP';
       else if (folder.includes('odc') || nameLower.startsWith('odc')) type = 'ODC';
       else if (folder.includes('olt') || nameLower.startsWith('olt')) type = 'OLT';
-      else if (folder.includes('ont') || folder.includes('onu') || folder.includes('pelanggan')) type = 'ONT';
+      else if (folder.includes('ont') || folder.includes('onu')) type = 'ONT';
 
-      // 5. Simpan sesuai tipe (Sekarang semua masuk ke infraData supaya muncul di peta)
-      const existing = infraData.find(i => i.name === name);
-      if (!existing) {
-        const newItem = {
-          id: (type === 'ODP' ? 'odp_' : 'pt_') + Math.random().toString(36).substr(2, 9),
+      try {
+        await topologyService.upsertNode({
+          id: (type === 'ODP' ? 'odp_' : 'pt_') + Math.random().toString(36).substr(2, 7),
           name,
-          coordinates: [lat, lng],
-          maxPorts: (type === 'ODC' || type === 'ODP') ? 8 : 0,
-          type: type // ODP, ODC, ONT, or POINT
-        };
-        infraData.push(newItem);
+          type,
+          lat,
+          lng,
+          metadata: { folder, kml_import: true }
+        });
         imported++;
         items.push({ name, type, lat, lng });
-      } else {
-        existing.coordinates = [lat, lng];
-        existing.type = type;
-        imported++;
-        items.push({ name, type, lat, lng, updated: true });
-      }
-    });
+      } catch (e) { console.error('[KML_NODE_ERROR]', e.message); skipped++; }
+    }
 
-    // 6. Simpan ke disk
-    saveJSON(INFRA_FILE, infraData);
-    saveJSON(COORDS_FILE, coordsStore);
-
-    addAuditLog('System', 'info', `KML Import: ${imported} items berhasil diimpor dari ${req.file.originalname}`, req.session?.userId || 'admin');
+    addAuditLog('System', 'info', `KML Import: ${imported} items berhasil diimpor`, req.session?.userId || 'admin', 'IMPORT_KML');
     io.emit('infraUpdated');
 
-    console.log(`[KML Import] ✅ Imported: ${imported}, Skipped: ${skipped}`);
     res.json({ success: true, imported, skipped, total: allPlacemarks.length, items: items.slice(0, 50) });
 
   } catch (err) {
@@ -1343,7 +1395,7 @@ app.post('/api/olt/provision', requireAuth, async (req, res) => {
 
     oltService.setConfig({ ip, community: cfg.snmpCommunity, snmpPort: cfg.snmpPort, telnetUser, telnetPass });
     const output = await oltService.executeOmciCommand(commands);
-    addAuditLog('OLT', 'info', `OMCI Provision executed: ${commands.length} command(s)`, req.session.user);
+    addAuditLog('OLT', 'info', `OMCI Provision executed: ${commands.length} command(s)`, req.session.userId, 'PROVISION_ONT');
     res.json({ success: true, output });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1655,7 +1707,7 @@ app.post('/api/devices/:id/config', requireAuth, async (req, res) => {
       await client.post(`/devices/${encodeURIComponent(id)}/tasks?connection_request`, task);
     }
 
-    addAuditLog('Device', 'info', `Config updated for device: ${id} (WiFi 2.4/5G & PPPOE)`, req.session.user);
+    addAuditLog('Device', 'info', `Config updated for device: ${id}`, req.session.userId, 'UPDATE_CONFIG', id);
     res.json({ success: true, message: 'Configuration tasks queued' });
   } catch (error) {
     console.error(`[Config Error] ${error.message}`);
@@ -1674,7 +1726,7 @@ app.post('/api/devices/:id/reboot', requireAuth, async (req, res) => {
     });
     // GenieACS Reboot Command
     await client.post(`/devices/${encodeURIComponent(id)}/tasks?connection_request`, { name: 'reboot' });
-    addAuditLog('Device', 'warning', `Reboot command sent to device: ${id}`, req.session.user);
+    addAuditLog('Device', 'warning', `Reboot command sent to device: ${id}`, req.session.userId, 'REBOOT_DEVICE', id);
     res.json({ success: true, message: 'Reboot command queued' });
   } catch (error) {
     console.error(`[Reboot Error] ${error.message}`);
@@ -1683,15 +1735,23 @@ app.post('/api/devices/:id/reboot', requireAuth, async (req, res) => {
 });
 
 app.get('/api/logs', requireAuth, async (req, res) => {
-  res.json(auditLogs.slice(0, 500));
+  try {
+    const logs = await topologyService.getAuditLogs(500);
+    res.json(logs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/api/logs/clear', requireAuth, (req, res) => {
-  auditLogs = [];
-  saveJSON(AUDIT_FILE, auditLogs);
-  addAuditLog('Security', 'warning', `Logs permanently cleared by ${req.session.userId || 'admin'}`);
-  io.emit('newLog'); // Trigger refresh to clients
-  res.json({ success: true });
+app.post('/api/logs/clear', requireAuth, async (req, res) => {
+  try {
+    await topologyService.clearAuditLogs();
+    await addAuditLog('Security', 'warning', `Logs permanently cleared by ${req.session.userId || 'admin'}`, req.session.userId, 'CLEAR_LOGS');
+    io.emit('newLog'); 
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── GET /api/devices/:id (Single Device) ────────────────────────────────────
