@@ -15,6 +15,7 @@ const multer = require('multer');
 const { XMLParser } = require('fast-xml-parser');
 const AdmZip = require('adm-zip');
 const rateLimit = require('express-rate-limit');
+const topologyService = require('./topologyService');
 require('dotenv').config();
 
 // Multer: simpan file upload di memory (tidak perlu ke disk)
@@ -46,10 +47,19 @@ app.use(cors({
   exposedHeaders: ['Set-Cookie']
 }));
 
+// Request Logger for Debugging
+app.use((req, res, next) => {
+  if (!req.url.includes('stats')) { // Jangan penuhi log dengan stats polling
+    console.log(`[API] ${req.method} ${req.url} - ${new Date().toLocaleTimeString()}`);
+  }
+  next();
+});
+
+
 // API Rate Limiting to prevent DoS attacks on OLT and Backend
 const apiLimiter = rateLimit({
   windowMs: 10000, // 10 seconds
-  max: 20, // Limit each IP to 20 requests per window
+  max: 100, // Increased for NOC high-frequency updates
   message: { error: 'Too many requests, please try again in 10 seconds' }
 });
 app.use('/api/', apiLimiter);
@@ -523,8 +533,8 @@ const getAcsConfig = () => loadConfig(); // Dynamic Getter: Selalu ambil data fr
 
 let auditLogs = loadJSON(AUDIT_FILE, []);
 let signalHistory = loadJSON(HISTORY_FILE, {});
-let infraData = loadJSON(INFRA_FILE, []);
-let coordsStore = loadJSON(COORDS_FILE, {});
+let infraData = []; // Now managed by Postgres
+let coordsStore = {}; // Now managed by Postgres
 let deviceStatusStore = {}; // Tracks online/offline status for logging
 
 function addAuditLog(category, severity, message, user = 'System') {
@@ -568,6 +578,15 @@ function recordHistory(devices) {
       addAuditLog('Device', severity, message);
     }
     deviceStatusStore[id] = currentStatus;
+
+    // 3. Sync with Topology (Postgres)
+    topologyService.upsertNode({
+      id,
+      name: sn,
+      type: 'ONT',
+      signal_status: currentStatus === 'offline' ? 'critical' : (getPowerStatus(rx) === 'bad' ? 'warning' : 'online'),
+      metadata: { last_seen: now, rx, tx: d.txPower }
+    }).catch(err => console.error('[TOPOLOGY_SYNC_ERROR]', err.message));
   });
   
   saveJSON(HISTORY_FILE, signalHistory);
@@ -1052,9 +1071,93 @@ app.post('/api/infrastructure', requireAuth, (req, res) => {
       addAuditLog('Infrastructure', 'info', `Updated ODP: ${name}`, req.session.user);
     }
   }
-  saveJSON(INFRA_FILE, infraData);
-  io.emit('infraUpdated');
-  res.json({ success: true });
+// ─── Topology Endpoints ───────────────────────────────────────────────────
+
+app.get('/api/topology', requireAuth, async (req, res) => {
+  try {
+    const [nodes, cables] = await Promise.all([
+      topologyService.getNodes(),
+      topologyService.getCables()
+    ]);
+    res.json({ nodes, cables });
+  } catch (err) {
+    console.error('[TOPOLOGY_ERROR]', err.message);
+    res.status(500).json({ error: 'Failed to fetch topology' });
+  }
+});
+
+app.post('/api/topology/nodes', requireAuth, async (req, res) => {
+  try {
+    const node = await topologyService.upsertNode(req.body);
+    io.emit('infraUpdated');
+    res.json(node);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/topology/cables', requireAuth, async (req, res) => {
+  try {
+    const cable = await topologyService.upsertCable(req.body);
+    io.emit('infraUpdated');
+    res.json(cable);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/topology/trace/:id', requireAuth, async (req, res) => {
+  try {
+    const path = await topologyService.tracePath(req.params.id);
+    res.json(path);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/topology/impact/:id', requireAuth, async (req, res) => {
+  try {
+    const nodes = await topologyService.getImpactedNodes(req.params.id);
+    res.json(nodes);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/infrastructure', requireAuth, async (req, res) => {
+  try {
+    const nodes = await topologyService.getNodes();
+    // Map to old format for backward compatibility
+    const oldFormat = nodes.map(n => ({
+      id: n.id,
+      name: n.name,
+      type: n.type,
+      coordinates: n.location ? [n.location.coordinates[1], n.location.coordinates[0]] : [0,0],
+      parentId: n.parent_id,
+      ...n.metadata
+    }));
+    res.json(oldFormat);
+  } catch (err) {
+    res.json([]);
+  }
+});
+
+app.post('/api/infrastructure', requireAuth, async (req, res) => {
+  try {
+    const node = await topologyService.upsertNode({
+      id: req.body.id || `node-${Date.now()}`,
+      name: req.body.name,
+      type: req.body.type || 'ODP',
+      lat: req.body.coordinates?.[0] || 0,
+      lng: req.body.coordinates?.[1] || 0,
+      parent_id: req.body.parentId || null,
+      metadata: req.body
+    });
+    io.emit('infraUpdated');
+    res.json({ success: true, node });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.delete('/api/infrastructure/:id', requireAuth, (req, res) => {
@@ -1578,7 +1681,15 @@ app.post('/api/devices/:id/reboot', requireAuth, async (req, res) => {
 });
 
 app.get('/api/logs', requireAuth, async (req, res) => {
-  res.json(auditLogs.slice(0, 100));
+  res.json(auditLogs.slice(0, 500));
+});
+
+app.post('/api/logs/clear', requireAuth, (req, res) => {
+  auditLogs = [];
+  saveJSON(AUDIT_FILE, auditLogs);
+  addAuditLog('Security', 'warning', `Logs permanently cleared by ${req.session.userId || 'admin'}`);
+  io.emit('newLog'); // Trigger refresh to clients
+  res.json({ success: true });
 });
 
 // ─── GET /api/devices/:id (Single Device) ────────────────────────────────────
