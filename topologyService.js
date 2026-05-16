@@ -31,7 +31,7 @@ const topologyService = {
   async getCables() {
     const res = await pool.query(`
       SELECT id, name, source_id, destination_id, ST_AsGeoJSON(path)::json as path,
-             cores, fiber_type, capacity_used, length_meters, estimated_loss_db, status, metadata
+             cores, fiber_type, length_meters, estimated_loss_db, status, metadata
       FROM cables
     `);
     return res.rows;
