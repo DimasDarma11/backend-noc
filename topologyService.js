@@ -4,7 +4,7 @@ require('dotenv').config();
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
 const topologyService = {
@@ -48,15 +48,33 @@ const topologyService = {
   },
 
   async upsertCable(cable) {
-    const { name, source_id, destination_id, path, cores, fiber_type, length_meters, estimated_loss_db, status } = cable;
+    const { segment_id, name, type, source_id, destination_id, path, cores, fiber_type, length_meters, estimated_loss_db, status, metadata } = cable;
     // path is expected to be an array of [lat, lng]
     const lineString = `LINESTRING(${path.map(p => `${p[1]} ${p[0]}`).join(', ')})`;
     const query = `
-      INSERT INTO cables (name, source_id, destination_id, path, cores, fiber_type, length_meters, estimated_loss_db, status)
-      VALUES ($1, $2, $3, ST_GeomFromText($4, 4326), $5, $6, $7, $8, $9)
+      INSERT INTO cables (segment_id, name, type, source_id, destination_id, path, cores, fiber_type, length_meters, estimated_loss_db, status, metadata)
+      VALUES ($1, $2, $3, $4, $5, ST_GeomFromText($6, 4326), $7, $8, $9, $10, $11, $12)
+      ON CONFLICT (segment_id) DO UPDATE SET
+        name = EXCLUDED.name,
+        type = EXCLUDED.type,
+        source_id = EXCLUDED.source_id,
+        destination_id = EXCLUDED.destination_id,
+        path = EXCLUDED.path,
+        cores = EXCLUDED.cores,
+        fiber_type = EXCLUDED.fiber_type,
+        length_meters = EXCLUDED.length_meters,
+        estimated_loss_db = EXCLUDED.estimated_loss_db,
+        status = EXCLUDED.status,
+        metadata = cables.metadata || EXCLUDED.metadata,
+        updated_at = CURRENT_TIMESTAMP
       RETURNING *;
     `;
-    const res = await pool.query(query, [name, source_id, destination_id, lineString, cores, fiber_type, length_meters, estimated_loss_db, status]);
+    const res = await pool.query(query, [
+      segment_id || `seg_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, 
+      name, type || 'DISTRIBUTION', source_id, destination_id, lineString, 
+      cores || 1, fiber_type, length_meters, estimated_loss_db, status || 'active', 
+      JSON.stringify(metadata || {})
+    ]);
     return res.rows[0];
   },
 
@@ -102,6 +120,31 @@ const topologyService = {
     `;
     const res = await pool.query(query, [failedNodeId]);
     return res.rows;
+  },
+
+  async addAuditLog(log) {
+    const { user_id, action, target_id, severity, message, result, metadata } = log;
+    const query = `
+      INSERT INTO audit_logs (user_id, action, target_id, severity, message, result, metadata)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *;
+    `;
+    const res = await pool.query(query, [user_id, action, target_id, severity, message, result, JSON.stringify(metadata || {})]);
+    return res.rows[0];
+  },
+
+  async getAuditLogs(limit = 500) {
+    const res = await pool.query(`
+      SELECT id, timestamp, severity, message, user_id as user, action, result, metadata
+      FROM audit_logs
+      ORDER BY timestamp DESC
+      LIMIT $1
+    `, [limit]);
+    return res.rows;
+  },
+
+  async clearAuditLogs() {
+    await pool.query('DELETE FROM audit_logs');
   }
 };
 
