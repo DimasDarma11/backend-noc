@@ -2,10 +2,19 @@ const { Pool } = require('pg');
 const format = require('pg-format');
 require('dotenv').config();
 
-const pool = new Pool({
+const dbConfig = {
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+};
+
+if (process.env.DB_SSL === 'true') {
+  dbConfig.ssl = { rejectUnauthorized: false };
+} else {
+  dbConfig.ssl = false;
+}
+
+console.log(`[DB] Connecting to ${process.env.DATABASE_URL?.split('@')[1] || 'database'} (SSL: ${dbConfig.ssl ? 'YES' : 'NO'})`);
+
+const pool = new Pool(dbConfig);
 
 const topologyService = {
   // ─── Core Queries ──────────────────────────────────────────────────────────
